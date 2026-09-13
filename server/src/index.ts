@@ -57,6 +57,7 @@ const app = new Elysia()
     cors({
       origin: (request: Request) => {
         const origin = request.headers.get("origin");
+        // อนุญาต Server-to-Server หรือ Same-origin requests ที่ไม่มี origin header
         if (!origin) return true;
 
         const allowedEnv = [
@@ -64,20 +65,22 @@ const app = new Elysia()
           process.env.NEXT_PUBLIC_FRONTEND_URL,
           "http://localhost:3000",
           "http://127.0.0.1:3000",
-        ].filter(Boolean);
+        ].filter(Boolean) as string[];
 
-        // อนุญาตโดเมน Frontend และ Localhost/LAN IP สำหรับการทดสอบ
+        // อนุญาตโดเมน Frontend ที่ตั้งค่าไว้, Localhost/LAN IP, หรือ Vercel Deployments
         if (
           allowedEnv.includes(origin) ||
           origin.startsWith("http://localhost:") ||
           origin.startsWith("http://127.0.0.1:") ||
           origin.startsWith("http://192.168.") ||
-          origin.startsWith("http://10.")
+          origin.startsWith("http://10.") ||
+          origin.endsWith(".vercel.app")
         ) {
           return true;
         }
 
-        return true;
+        // ปฏิเสธ Origin แปลกปลอมที่ไม่ได้รับอนุญาต
+        return false;
       },
       credentials: true,
       methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
@@ -88,8 +91,13 @@ const app = new Elysia()
         "X-Requested-With",
         "X-Api-Key",
         "x-api-key",
+        "X-Internal-Secret",
+        "x-internal-secret",
+        "X-Server-Secret",
+        "x-server-secret",
         "X-Client-Key",
         "x-client-key",
+        "x-forwarded-by",
       ],
     }),
   )

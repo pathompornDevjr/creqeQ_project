@@ -39,7 +39,7 @@ async function handleProxy(
       ? `${BACKEND_BASE_URL}/${subPath}?${searchParams}`
       : `${BACKEND_BASE_URL}/${subPath}`;
 
-    // คัดลอก Headers ต้นทางโดยข้าม Header บางตัวที่ไม่จำเป็น
+    // คัดลอก Headers ต้นทางโดยข้าม Header บางตัวที่ไม่จำเป็น และลบ Header ความปลอดภัยที่อาจถูกส่งมาจากเบราว์เซอร์
     const headers = new Headers();
     request.headers.forEach((value, key) => {
       const lowerKey = key.toLowerCase();
@@ -47,17 +47,27 @@ async function handleProxy(
         lowerKey !== "host" &&
         lowerKey !== "content-length" &&
         lowerKey !== "x-api-key" &&
-        lowerKey !== "x-client-key"
+        lowerKey !== "x-client-key" &&
+        lowerKey !== "x-internal-secret" &&
+        lowerKey !== "x-server-secret" &&
+        lowerKey !== "x-forwarded-by"
       ) {
         headers.set(key, value);
       }
     });
 
-    // แทรก x-api-key อย่างปลอดภัยจากฝั่ง Server เท่านั้น
-    const serverApiKey = (process.env.API_KEY || "").trim().replace(/^["']|["']$/g, "");
+    // แทรก Secret Key และ Security Markers อย่างปลอดภัยจากฝั่ง Server เท่านั้น
+    const serverApiKey = (
+      process.env.INTERNAL_API_SECRET ||
+      process.env.API_KEY ||
+      ""
+    ).trim().replace(/^["']|["']$/g, "");
+
     if (serverApiKey) {
       headers.set("x-api-key", serverApiKey);
+      headers.set("x-internal-secret", serverApiKey);
     }
+    headers.set("x-forwarded-by", "crepeq-frontend-bff");
 
     // ส่งต่อคุกกี้เพื่อใช้ในการตรวจสอบสิทธิ์
     const cookieHeader = request.headers.get("cookie");
