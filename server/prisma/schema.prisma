@@ -1,0 +1,405 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "mysql"
+}
+
+// ==========================================
+// 1. Customer Management (ระบบลูกค้า)
+// ==========================================
+model customers {
+  customer_id Int      @id @default(autoincrement())
+  nickname    String
+  phone       String   @unique
+  avatar_url  String?  @db.Text
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @default(now()) @updatedAt
+
+  orders orders[]
+
+  @@index([phone])
+}
+
+// ==========================================
+// 2. Restaurant & Staff Users (ระบบผู้ใช้ร้านค้า)
+// ==========================================
+model restaurant_users {
+  res_user_id  String   @id @default(uuid())
+  username     String   @unique
+  passwordHash String
+  fname        String
+  lname        String
+  phone        String?
+  email        String?  @unique
+  role         String   @default("owner") // "owner", "staff"
+  status       Boolean  @default(true)
+
+  restaurantId    Int
+  restaurant_data restaurant_data @relation(fields: [restaurantId], references: [res_id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@index([restaurantId])
+  @@index([email])
+  @@index([phone])
+  @@index([status])
+}
+
+// ==========================================
+// 3. Restaurant Profile & Payment Settings (ข้อมูลร้านค้าและการรับเงิน)
+// ==========================================
+model restaurant_data {
+  res_id                     Int      @id @default(autoincrement())
+  restaurant_name            String
+  restaurant_desc            String?  @db.Text
+  restaurant_logo            String?  @db.Text
+  restaurant_cover           String?  @db.Text
+  restaurant_primary_theme   String?  @default("#E11D48")
+  restaurant_secondary_theme String?  @default("#F59E0B")
+  restaurant_other_theme     String?  @default("#FB923C")
+  restaurant_open_time       String?  @default("10:00")
+  restaurant_close_time      String?  @default("22:00")
+  restaurant_day             String?  @default("ทุกวัน")
+  restaurant_phone           String?
+  restaurant_address         String?  @db.Text
+  is_open                    Boolean  @default(true)
+  is_paused                  Boolean  @default(false)
+  pause_until                DateTime?
+  pause_reason               String?
+  allow_preorder_when_paused Boolean  @default(false)
+
+  // Payment & Bank Info
+  promptpay_number    String?
+  promptpay_name      String?
+  promptpay_qr        String? @db.Text
+  bank_name           String?
+  bank_account_number String?
+  bank_account_name   String?
+  qrpayment_url       String? @db.Text
+
+  // Social & Online Contacts
+  restaurant_email String?
+  google_maps_url  String? @db.Text
+  line_id          String?
+  line_oa_url      String? @db.Text
+  facebook_url     String? @db.Text
+  instagram_url    String? @db.Text
+  tiktok_url       String? @db.Text
+  youtube_url      String? @db.Text
+  x_url            String? @db.Text
+  website_url      String? @db.Text
+
+  // Food Delivery Platforms
+  lineman_url      String? @db.Text
+  grab_url         String? @db.Text
+  shopeefood_url   String? @db.Text
+  robinhood_url    String? @db.Text
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  restaurant_users restaurant_users[]
+  menu_categories  menu_categories[]
+  menus            menu[]
+  crusts           crepe_crusts[]
+  sample_menus     sample_menus[]
+  orders           orders[]
+  inventory_items  inventory_items[]
+
+  @@index([is_open])
+  @@index([is_paused])
+  @@index([restaurant_name])
+}
+
+// ==========================================
+// 4. Menu Categories (หมวดหมู่อาหาร/เครป)
+// ==========================================
+model menu_categories {
+  category_id    Int     @id @default(autoincrement())
+  category_name  String
+  category_order Int     @default(0)
+  is_active      Boolean @default(true)
+  remark         String?
+
+  restaurantId Int
+  restaurant   restaurant_data @relation(fields: [restaurantId], references: [res_id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  menus menu[]
+
+  @@index([restaurantId])
+  @@index([is_active])
+}
+
+// ==========================================
+// 5. Menu Items (รายการเมนูเครป/สินค้า)
+// ==========================================
+model menu {
+  menu_id      Int     @id @default(autoincrement())
+  menu_name    String
+  description  String? @db.Text
+  price        Int     @default(0)
+  image_url    String? @db.Text
+  is_available Boolean @default(true) // สถานะความพร้อมของอาหาร/วัตถุดิบ
+  is_popular   Boolean @default(false)
+
+  restaurantId Int
+  restaurant   restaurant_data @relation(fields: [restaurantId], references: [res_id], onDelete: Cascade)
+
+  category_id Int?
+  category    menu_categories? @relation(fields: [category_id], references: [category_id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  images      menu_images[]
+  options     menu_options[]
+  order_items order_items[]
+
+  @@index([restaurantId])
+  @@index([category_id])
+  @@index([is_available])
+  @@index([is_popular])
+}
+
+// ==========================================
+// 6. Menu Extra Images (รูปภาพเมนูเพิ่มเติม)
+// ==========================================
+model menu_images {
+  image_id  Int     @id @default(autoincrement())
+  image_url String  @db.Text
+  menu_id   Int
+  menu      menu    @relation(fields: [menu_id], references: [menu_id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@index([menu_id])
+}
+
+// ==========================================
+// 7. Menu Options / Toppings (ตัวเลือก แป้ง ไส้ ซอส ท็อปปิ้ง)
+// ==========================================
+model menu_options {
+  menu_options_id Int     @id @default(autoincrement())
+  option_name     String
+  required        Boolean @default(false)
+  allowMultiple   Boolean @default(false)
+  maxChoices      Int     @default(1)
+  choices         String? @db.Text // JSON format: [{"name":"นูเทลล่า","price":15,"is_available":true}]
+
+  menu_id Int
+  menu    menu @relation(fields: [menu_id], references: [menu_id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  orderItemOptions menu_option_orderItem[]
+
+  @@index([menu_id])
+}
+
+// ==========================================
+// 7.1 Crepe Crusts (รายการแป้งเครป)
+// ==========================================
+model crepe_crusts {
+  crust_id     Int      @id @default(autoincrement())
+  crust_name   String
+  description  String?  @db.Text
+  price        Int      @default(10)
+  image_url    String?  @db.Text
+  is_available Boolean  @default(true)
+  sort_order   Int      @default(0)
+
+  restaurantId Int
+  restaurant   restaurant_data @relation(fields: [restaurantId], references: [res_id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@index([restaurantId])
+  @@index([is_available])
+}
+
+// ==========================================
+// 7.2 Sample Crepe Menus (เมนูตัวอย่างเครปสำหรับโชว์หน้าแรก)
+// ==========================================
+model sample_menus {
+  sample_id    Int      @id @default(autoincrement())
+  menu_name    String
+  description  String?  @db.Text
+  price        Int?     @default(0)
+  image_url    String?  @db.Text
+  is_active    Boolean  @default(true)
+  sort_order   Int      @default(0)
+  tags         String?  // e.g. "เมนูยอดนิยม", "Signature", "แนะนำ"
+
+  restaurantId Int
+  restaurant   restaurant_data @relation(fields: [restaurantId], references: [res_id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@index([restaurantId])
+  @@index([is_active])
+  @@index([sort_order])
+}
+
+// ==========================================
+// 8. Orders & Queue Management (ระบบคิวและคำสั่งซื้อ)
+// ==========================================
+model orders {
+  order_id     Int     @id @default(autoincrement())
+  queue_number String  // เช่น "Q001", "Q002", "1", "2"
+  queue_date   String  // "YYYY-MM-DD" สำหรับรันเลขคิวประจำวัน
+  order_status String  @default("pending") // "pending", "confirmed", "cooking", "ready", "completed", "cancelled"
+
+  restaurant_id     Int
+  restaurant        restaurant_data @relation(fields: [restaurant_id], references: [res_id], onDelete: Cascade)
+
+  customer_id       Int?
+  customer          customers?      @relation(fields: [customer_id], references: [customer_id], onDelete: SetNull)
+  customer_nickname String?
+  customer_phone    String?
+
+  device_id           String?
+  pickup_type         String?   @default("asap") // "asap", "scheduled"
+  scheduled_time      String?   // e.g. "15:00"
+  pickup_qr_code      String?   @db.Text
+  payment_method      String?   @default("promptpay") // "promptpay", "cash", "online"
+  payment_status      String?   @default("pending")   // "pending", "paid", "declined"
+  has_slip            Boolean   @default(false)
+  slip_url            String?   @db.Text
+  total               Int       @default(0)
+  remark              String?   @db.Text // ความต้องการพิเศษ เช่น แป้งกรอบมาก, ไม่ราดนม
+  cancel_reason       String?   @db.Text
+
+  estimated_prep_time Int?      @default(10) // เวลาโดยประมาณในการจัดทำ (นาที)
+
+  // Status Milestones
+  confirmed_at        DateTime?
+  cooking_at          DateTime?
+  cooking_started_at  DateTime?
+  ready_at            DateTime?
+  completed_at        DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  orderItems order_items[]
+  payment    payments?
+
+  @@index([restaurant_id])
+  @@index([customer_id])
+  @@index([queue_date])
+  @@index([queue_number])
+  @@index([order_status])
+  @@index([createdAt])
+}
+
+// ==========================================
+// 9. Order Items (รายการเมนูในออเดอร์)
+// ==========================================
+model order_items {
+  item_id   Int     @id @default(autoincrement())
+  menu_name String
+  price     Int
+  quantity  Int     @default(1)
+  remark    String?
+
+  order_id Int
+  order    orders @relation(fields: [order_id], references: [order_id], onDelete: Cascade)
+
+  menu_id Int
+  menu    menu   @relation(fields: [menu_id], references: [menu_id])
+
+  createdAt DateTime @default(now())
+
+  selected_options menu_option_orderItem[]
+
+  @@index([order_id])
+  @@index([menu_id])
+}
+
+// ==========================================
+// 10. Selected Options in Order Item (ตัวเลือกและท็อปปิ้งที่เลือก)
+// ==========================================
+model menu_option_orderItem {
+  option_order_item_id Int     @id @default(autoincrement())
+  option_name          String?
+  selected_choice      String?
+  price                Int     @default(0)
+
+  order_item_id Int
+  orderItem     order_items @relation(fields: [order_item_id], references: [item_id], onDelete: Cascade)
+
+  menuOption_id Int?
+  menuOptions   menu_options? @relation(fields: [menuOption_id], references: [menu_options_id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@index([order_item_id])
+  @@index([menuOption_id])
+}
+
+// ==========================================
+// 11. Payments (ข้อมูลการชำระเงินออนไลน์)
+// ==========================================
+model payments {
+  payment_id        Int       @id @default(autoincrement())
+  amount            Int       @default(0)
+  status            String    @default("pending") // "pending", "paid", "declined", "expired", "failed"
+  provider          String?   @default("promptpay") // "promptpay", "xendit"
+  transaction_ref   String?
+  slip_url          String?   @db.Text
+  paid_at           DateTime?
+
+  // Xendit specific fields
+  xendit_invoice_id String?
+  invoice_url       String?   @db.Text
+  payment_channel   String?   // e.g. "PROMPTPAY", "CREDIT_CARD", "SHOPEEPAY"
+  expiry_date       DateTime?
+
+  order_id Int?   @unique
+  order    orders? @relation(fields: [order_id], references: [order_id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@index([status])
+  @@index([xendit_invoice_id])
+}
+
+// ==========================================
+// 12. Inventory Items (วัตถุดิบและสถานะไส้)
+// ==========================================
+model inventory_items {
+  item_id        Int      @id @default(autoincrement())
+  name           String
+  category       String   @default("topping") // "base", "topping", "ingredient"
+  topping_group  String?  @default("sweet")   // "sweet", "savory", "fruit"
+  quantity       Int      @default(50)
+  unit           String   @default("ชิ้น")
+  status         String   @default("available") // "available", "low_stock", "out_of_stock"
+  price          Int      @default(10)
+
+  restaurant_id  Int
+  restaurant     restaurant_data @relation(fields: [restaurant_id], references: [res_id], onDelete: Cascade)
+
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @default(now()) @updatedAt
+
+  @@index([restaurant_id])
+  @@index([status])
+  @@index([category])
+}
+

@@ -1,0 +1,106 @@
+{
+  "users": [
+    {
+      "id": "usr-admin-1",
+      "email": "admin@qorder.th",
+      "name": "ผู้ดูแลระบบ QOrder",
+      "role": "admin",
+      "status": "active"
+    },
+    {
+      "id": "usr-owner-1",
+      "email": "owner@kraibamphai.th",
+      "name": "สมชาย ใจดี",
+      "phone": "081-234-5678",
+      "role": "restaurant_owner",
+      "restaurantId": "r-001",
+      "status": "active"
+    },
+    {
+      "id": "usr-owner-2",
+      "email": "contact@ramensora.th",
+      "name": "เคนจิ ซาโตะ",
+      "phone": "089-876-5432",
+      "role": "restaurant_owner",
+      "restaurantId": "r-002",
+      "status": "active"
+    }
+  ],
+  "restaurants": [
+    {
+      "id": "r-001",
+      "name": "ครัวบ้านไผ่",
+      "category": "อาหารไทย",
+      "ownerName": "สมชาย ใจดี",
+      "phone": "081-234-5678",
+      "email": "owner@kraibamphai.th",
+      "plan": "12month",
+      "expiryDate": "2026-09-01",
+      "remainingDays": 18,
+      "status": "active",
+      "address": "123 ถ.สุขุมวิท แขวงคลองเตย เขตคลองเตย กรุงเทพมหานคร 10110",
+      "themeColors": {
+        "primary": "#F59E0B",
+        "secondary": "#10B981",
+        "accent": "#6366F1"
+      },
+      "bankAccount": {
+        "bank": "KBANK",
+        "accountNumber": "123-4-56789-0",
+        "accountName": "ร้านครัวบ้านไผ่"
+      }
+    },
+    {
+      "id": "r-002",
+      "name": "Ramen Sora",
+      "category": "อาหารญี่ปุ่น",
+      "ownerName": "เคนจิ ซาโตะ",
+      "phone": "089-876-5432",
+      "email": "contact@ramensora.th",
+      "plan": "12month",
+      "expiryDate": "2026-09-15",
+      "remainingDays": 32,
+      "status": "active",
+      "address": "88 เอกมัย ซอย 10 กรุงเทพมหานคร 10110",
+      "themeColors": {
+        "primary": "#EF4444",
+        "secondary": "#F59E0B",
+        "accent": "#3B82F6"
+      },
+      "bankAccount": {
+        "bank": "SCB",
+        "accountNumber": "987-6-54321-0",
+        "accountName": "ร้าน Ramen Sora"
+      }
+    }
+  ],
+  "packages": [
+    {
+      "id": "pkg-1m",
+      "name": "พรีเมียม 1 เดือน",
+      "price": 590,
+      "durationDays": 30,
+      "features": [
+        "สร้างเมนูและหมวดหมู่ไม่จำกัด",
+        "ระบบสั่งอาหารผ่าน QR Code",
+        "ระบบจัดการคิวอาหารและเช็คบิล",
+        "ปรับแต่งสีร้าน โลโก้ และแบนเนอร์"
+      ]
+    },
+    {
+      "id": "pkg-12m",
+      "name": "พรีเมียม 1 ปี (12 เดือน)",
+      "price": 7080,
+      "durationDays": 360,
+      "popular": true,
+      "discountText": "ประหยัดกว่าแบบรายเดือน",
+      "features": [
+        "ฟีเจอร์ครบถ้วนทุกอย่าง",
+        "ระบบสั่งอาหารผ่าน QR Code ไม่จำกัดโต๊ะ",
+        "ระบบจัดการคิวอาหารและเช็คบิล",
+        "ปรับแต่งสีร้าน โลโก้ และแบนเนอร์",
+        "บริการดูแลช่วยเหลือพิเศษ 24 ชม."
+      ]
+    }
+  ]
+}
