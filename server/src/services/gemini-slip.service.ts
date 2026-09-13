@@ -9,7 +9,7 @@
  * - รหัสอ้างอิงธุรกรรม (transaction_ref)
  */
 
-import { GoogleGenerativeAI, SchemaType } from "@google/generative-ai";
+import { GoogleGenerativeAI, SchemaType, Schema } from "@google/generative-ai";
 
 /**
  * ข้อมูลบัญชีรับเงินของร้านค้าสำหรับใช้ตรวจสอบเปรียบเทียบ
@@ -71,74 +71,20 @@ export class GeminiSlipService {
       };
     }
 
-    try {
-      console.log(`[Gemini Vision] 🤖 Extracting structured data from slip image...`);
-      const model = client.getGenerativeModel({
-        model: "gemini-2.5-flash",
-        generationConfig: {
-          temperature: 0.1,
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: SchemaType.OBJECT,
-            properties: {
-              is_bank_slip: {
-                type: SchemaType.BOOLEAN,
-                description: "true ถ้าภาพเป็นสลิปโอนเงินผ่านธนาคารไทยจริง (กสิกร, SCB, กรุงไทย, BBL, ออมสิน, Krungsri, TTB, พร้อมเพย์ ฯลฯ) false ถ้าเป็นรูปภาพอื่นที่ไม่ใช่สลิปโอนเงิน",
-              },
-              amount: {
-                type: SchemaType.NUMBER,
-                description: "จำนวนเงินที่โอนในสลิป (บาท) เช่น 150.00 หรือ 50",
-              },
-              transfer_date: {
-                type: SchemaType.STRING,
-                description: "วันที่โอนเงิน แปลงเป็นรูปแบบ ค.ศ. YYYY-MM-DD เช่น 2026-09-13 (หากมี)",
-              },
-              transfer_time: {
-                type: SchemaType.STRING,
-                description: "เวลาที่โอนเงิน เช่น 14:30:00 หรือ 14:30",
-              },
-              datetime_str: {
-                type: SchemaType.STRING,
-                description: "ข้อความวันที่และเวลาดิบตามที่ปรากฏบนสลิป เช่น '13 ก.ย. 2569 14:30 น.' หรือ '13/09/2026 14:30'",
-              },
-              receiver_bank: {
-                type: SchemaType.STRING,
-                description: "ชื่อธนาคารปลายทาง เช่น กสิกรไทย, ไทยพาณิชย์, กรุงไทย, กรุงเทพ, ออมสิน, กรุงศรี, TTB, พร้อมเพย์",
-              },
-              receiver_account: {
-                type: SchemaType.STRING,
-                description: "เลขที่บัญชีหรือเบอร์พร้อมเพย์ของผู้รับเงินตามที่ปรากฏบนสลิป",
-              },
-              receiver_name: {
-                type: SchemaType.STRING,
-                description: "ชื่อ-นามสกุล หรือชื่อบัญชีของผู้รับเงิน",
-              },
-              sender_bank: {
-                type: SchemaType.STRING,
-                description: "ธนาคารของผู้โอนเงิน (ถ้ามี)",
-              },
-              sender_name: {
-                type: SchemaType.STRING,
-                description: "ชื่อ-นามสกุล หรือชื่อบัญชีของผู้โอนเงิน (ถ้ามี)",
-              },
-              transaction_ref: {
-                type: SchemaType.STRING,
-                description: "รหัสอ้างอิงการทำรายการ / รหัสธุรกรรม (Transaction Ref / ID) ที่พบบนสลิป",
-              },
-            },
-            required: [
-              "is_bank_slip",
-            ],
-          },
-        },
-      });
+    // Models to try in order of priority
+    const candidateModels = [
+      process.env.GEMINI_MODEL?.trim(),
+      "gemini-3.6-flash",
+      "gemini-1.5-flash",
+      "gemini-2.0-flash",
+    ].filter(Boolean) as string[];
 
-      // Extract raw base64 and mime type
-      const mimeMatch = base64Image.match(/^data:(image\/[a-zA-Z+]+);base64,/);
-      const mimeType = mimeMatch ? mimeMatch[1] : "image/png";
-      const cleanBase64 = base64Image.replace(/^data:image\/[a-zA-Z+]+;base64,/, "");
+    // Extract raw base64 and mime type
+    const mimeMatch = base64Image.match(/^data:(image\/[a-zA-Z+]+);base64,/);
+    const mimeType = mimeMatch ? mimeMatch[1] : "image/png";
+    const cleanBase64 = base64Image.replace(/^data:image\/[a-zA-Z+]+;base64,/, "");
 
-      const prompt = `
+    const prompt = `
 คุณคือระบบอ่านข้อมูลสลิปโอนเงินธนาคารไทย (Thai Bank Slip OCR & Data Extractor)
 หน้าที่ของคุณคืออ่านรูปภาพที่แนบมานี้อย่างละเอียด แล้วสกัดข้อมูลดิบออกมาในรูปแบบ JSON:
 
@@ -153,29 +99,100 @@ export class GeminiSlipService {
 ตอบกลับเป็น JSON ตาม Schema ที่กำหนดเท่านั้น
 `;
 
-      const result = await model.generateContent([
-        prompt,
-        {
-          inlineData: {
-            mimeType,
-            data: cleanBase64,
-          },
+    const schemaConfig: Schema = {
+      type: SchemaType.OBJECT,
+      properties: {
+        is_bank_slip: {
+          type: SchemaType.BOOLEAN,
+          description: "true ถ้าภาพเป็นสลิปโอนเงินผ่านธนาคารไทยจริง (กสิกร, SCB, กรุงไทย, BBL, ออมสิน, Krungsri, TTB, พร้อมเพย์ ฯลฯ) false ถ้าเป็นรูปภาพอื่นที่ไม่ใช่สลิปโอนเงิน",
         },
-      ]);
+        amount: {
+          type: SchemaType.NUMBER,
+          description: "จำนวนเงินที่โอนในสลิป (บาท) เช่น 150.00 หรือ 50",
+        },
+        transfer_date: {
+          type: SchemaType.STRING,
+          description: "วันที่โอนเงิน แปลงเป็นรูปแบบ ค.ศ. YYYY-MM-DD เช่น 2026-09-13 (หากมี)",
+        },
+        transfer_time: {
+          type: SchemaType.STRING,
+          description: "เวลาที่โอนเงิน เช่น 14:30:00 หรือ 14:30",
+        },
+        datetime_str: {
+          type: SchemaType.STRING,
+          description: "ข้อความวันที่และเวลาดิบตามที่ปรากฏบนสลิป เช่น '13 ก.ย. 2569 14:30 น.' หรือ '13/09/2026 14:30'",
+        },
+        receiver_bank: {
+          type: SchemaType.STRING,
+          description: "ชื่อธนาคารปลายทาง เช่น กสิกรไทย, ไทยพาณิชย์, กรุงไทย, กรุงเทพ, ออมสิน, กรุงศรี, TTB, พร้อมเพย์",
+        },
+        receiver_account: {
+          type: SchemaType.STRING,
+          description: "เลขที่บัญชีหรือเบอร์พร้อมเพย์ของผู้รับเงินตามที่ปรากฏบนสลิป",
+        },
+        receiver_name: {
+          type: SchemaType.STRING,
+          description: "ชื่อ-นามสกุล หรือชื่อบัญชีของผู้รับเงิน",
+        },
+        sender_bank: {
+          type: SchemaType.STRING,
+          description: "ธนาคารของผู้โอนเงิน (ถ้ามี)",
+        },
+        sender_name: {
+          type: SchemaType.STRING,
+          description: "ชื่อ-นามสกุล หรือชื่อบัญชีของผู้โอนเงิน (ถ้ามี)",
+        },
+        transaction_ref: {
+          type: SchemaType.STRING,
+          description: "รหัสอ้างอิงการทำรายการ / รหัสธุรกรรม (Transaction Ref / ID) ที่พบบนสลิป",
+        },
+      },
+      required: [
+        "is_bank_slip",
+      ],
+    };
 
-      const textResponse = result.response.text();
-      console.log(`[Gemini Slip Extractor] 🤖 Raw AI Extraction Response:\n`, textResponse);
+    let lastError: any = null;
 
-      const parsed: ExtractedSlipData = JSON.parse(textResponse);
-      parsed.is_api_error = false;
-      return parsed;
-    } catch (error: any) {
-      console.error("[Gemini AI Error]", error);
-      return {
-        is_bank_slip: false,
-        is_api_error: true,
-        error_message: error.message || "เกิดข้อผิดพลาดในการสกัดข้อมูลสลิปด้วย AI",
-      };
+    for (const modelName of candidateModels) {
+      try {
+        console.log(`[Gemini Vision] 🤖 Trying model [${modelName}] to extract slip data...`);
+        const model = client.getGenerativeModel({
+          model: modelName,
+          generationConfig: {
+            temperature: 0.1,
+            responseMimeType: "application/json",
+            responseSchema: schemaConfig,
+          },
+        });
+
+        const result = await model.generateContent([
+          prompt,
+          {
+            inlineData: {
+              mimeType,
+              data: cleanBase64,
+            },
+          },
+        ]);
+
+        const textResponse = result.response.text();
+        console.log(`[Gemini Slip Extractor] 🤖 Raw AI Extraction Response (${modelName}):\n`, textResponse);
+
+        const parsed: ExtractedSlipData = JSON.parse(textResponse);
+        parsed.is_api_error = false;
+        return parsed;
+      } catch (err: any) {
+        lastError = err;
+        console.warn(`[Gemini AI] ⚠️ Model [${modelName}] failed: ${err?.message || err}`);
+      }
     }
+
+    console.error("[Gemini AI All Models Failed]", lastError);
+    return {
+      is_bank_slip: false,
+      is_api_error: true,
+      error_message: lastError?.message || "เกิดข้อผิดพลาดในการสกัดข้อมูลสลิปด้วย AI ทุก Model",
+    };
   }
 }
