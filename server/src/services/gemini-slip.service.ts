@@ -37,6 +37,8 @@ export interface ExtractedSlipData {
   sender_name?: string;         // ชื่อผู้โอนเงิน
   transaction_ref?: string;     // รหัสอ้างอิงธุรกรรม
   is_api_error?: boolean;       // เกิดข้อผิดพลาดของ AI API หรือไม่
+  is_rate_limit?: boolean;      // ติด Rate Limit (Status 429) หรือไม่
+  status_code?: number;         // HTTP Status Code จาก AI API (เช่น 429, 500)
   error_message?: string;       // ข้อความแสดงข้อผิดพลาด (ถ้ามี)
 }
 
@@ -152,10 +154,10 @@ export class GeminiSlipService {
       ],
     };
 
-    const targetModel = process.env.GEMINI_MODEL?.trim() || "gemini-3.6-flash";
+    const targetModel = "gemini-3.6-flash";
 
     try {
-      console.log(`[Gemini Vision] 🤖 Extracting structured data from slip image using [${targetModel}]...`);
+      console.log(`[Gemini Vision] 🤖 Extracting structured data from slip image using [${targetModel} (Only)]...`);
       const model = client.getGenerativeModel({
         model: targetModel,
         generationConfig: {
@@ -180,13 +182,15 @@ export class GeminiSlipService {
 
       const parsed: ExtractedSlipData = JSON.parse(textResponse);
       parsed.is_api_error = false;
+      parsed.status_code = 200;
       return parsed;
     } catch (err: any) {
       console.error("[Gemini AI Error]", err);
       const errMsg = String(err?.message || err);
 
+      const is429 = errMsg.includes("429") || errMsg.includes("Quota") || errMsg.includes("quota") || errMsg.includes("rate-limit") || errMsg.includes("RESOURCE_EXHAUSTED");
       let userFacingError = "เกิดข้อผิดพลาดในการเชื่อมต่อกับ AI ตรวจสอบสลิป";
-      if (errMsg.includes("429") || errMsg.includes("Quota") || errMsg.includes("quota") || errMsg.includes("rate-limit")) {
+      if (is429) {
         userFacingError = "โควตาการใช้งานการตรวจสลิป เต็มชั่วคราว กรุณารอสักครู่ (ประมาณ 1 นาที) แล้วลองใหม่อีกครั้ง";
       } else if (errMsg.includes("404") || errMsg.includes("not found")) {
         userFacingError = `ไม่พบโมเดล AI (${targetModel}) กรุณาตรวจสอบการตั้งค่า GEMINI_MODEL`;
@@ -197,6 +201,8 @@ export class GeminiSlipService {
       return {
         is_bank_slip: false,
         is_api_error: true,
+        is_rate_limit: is429,
+        status_code: is429 ? 429 : 500,
         error_message: userFacingError,
       };
     }

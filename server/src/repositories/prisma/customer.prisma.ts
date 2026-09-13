@@ -32,6 +32,265 @@ import {
 } from "../interfaces/customer.repository.interface";
 import { RestaurantRepositoryFactory } from "../index";
 
+interface ParsedSlipDate {
+  year: number;
+  month: number;
+  day: number;
+  hour: number;
+  minute: number;
+  second: number;
+  dateObj: Date;
+}
+
+/**
+ * ฟังก์ชันทำความสะอาดเลขบัญชี/เบอร์พร้อมเพย์ ให้เหลือเฉพาะตัวเลข
+ */
+function cleanDigits(val?: string | null): string {
+  if (!val) return "";
+  let digits = String(val).replace(/\D/g, "");
+  // แปลงเบอร์มือถือฟอร์แมต 0066... หรือ 66... ให้เป็น 0...
+  if (digits.startsWith("0066")) {
+    digits = "0" + digits.slice(4);
+  } else if (digits.startsWith("66") && (digits.length === 11 || digits.length === 12)) {
+    digits = "0" + digits.slice(2);
+  }
+  return digits;
+}
+
+/**
+ * ฟังก์ชันแยกคำสำคัญจากชื่อผู้รับ (ตัดคำนำหน้า เช่น นาย นาง นางสาว บริษัท บจก. ฯลฯ)
+ */
+function extractNameTokens(name?: string | null): string[] {
+  if (!name) return [];
+  const clean = String(name)
+    .replace(/(?:นาย|นางสาว|นาง|ด\.ช\.|ด\.ญ\.|บจก\.|บริษัท|หจก\.|จำกัด|มหาชน|mr\.|mrs\.|ms\.|miss)\s*/gi, " ")
+    .replace(/[^a-zA-Z0-9\u0E00-\u0E7F\s]/g, " ")
+    .toLowerCase()
+    .trim();
+
+  return clean
+    .split(/\s+/)
+    .map((t) => t.trim())
+    .filter((t) => t.length >= 3);
+}
+
+/**
+ * ตรวจสอบว่าบัญชีหรือชื่อผู้รับในสลิป ตรงกับบัญชีรับเงินของร้านค้าในระบบหรือไม่
+ */
+function isReceiverMatch(
+  slipReceiverAcc?: string | null,
+  slipReceiverName?: string | null,
+  shopPP?: string | null,
+  shopBankAcc?: string | null,
+  shopAccountName?: string | null
+): { matched: boolean; reason: string } {
+  const cleanShopPP = cleanDigits(shopPP);
+  const cleanShopBank = cleanDigits(shopBankAcc);
+  const shopNameTokens = extractNameTokens(shopAccountName);
+
+  // ถ้าทางร้านไม่ได้ตั้งค่าบัญชีรับเงินใดๆ เลย ให้ถือว่า match
+  if (!cleanShopPP && !cleanShopBank && shopNameTokens.length === 0) {
+    return { matched: true, reason: "Shop has no payment profile configured" };
+  }
+
+  const cleanSlipAcc = cleanDigits(slipReceiverAcc);
+  const slipNameTokens = extractNameTokens(slipReceiverName);
+
+  // ตรวจสอบชื่อว่าตรงหรือไม่
+  let nameMatched = false;
+  if (shopNameTokens.length > 0 && slipNameTokens.length > 0) {
+    for (const sToken of shopNameTokens) {
+      for (const slipToken of slipNameTokens) {
+        if (
+          sToken === slipToken ||
+          sToken.includes(slipToken) ||
+          slipToken.includes(sToken)
+        ) {
+          nameMatched = true;
+          break;
+        }
+      }
+      if (nameMatched) break;
+    }
+  }
+
+  // ตรวจสอบเลขบัญชี / พร้อมเพย์
+  let fullAccMatched = false;
+  let partialAccMatched = false;
+
+  if (cleanSlipAcc && cleanSlipAcc.length >= 4) {
+    // 1. ตรวจสอบแบบเต็มจำนวน (Full Match เช่น 10 หลักตรงกันเป๊ะ)
+    if (cleanShopPP && (cleanShopPP === cleanSlipAcc || (cleanSlipAcc.length >= 9 && cleanShopPP.endsWith(cleanSlipAcc)))) {
+      fullAccMatched = true;
+    }
+    if (cleanShopBank && (cleanShopBank === cleanSlipAcc || (cleanSlipAcc.length >= 9 && cleanShopBank.endsWith(cleanSlipAcc)))) {
+      fullAccMatched = true;
+    }
+
+    // 2. ตรวจสอบแบบเลขท้าย (Masked Match เช่น 4-8 หลักท้าย)
+    if (!fullAccMatched) {
+      if (cleanShopPP && (cleanShopPP.endsWith(cleanSlipAcc) || cleanSlipAcc.endsWith(cleanShopPP) || cleanShopPP.endsWith(cleanSlipAcc.slice(-4)))) {
+        partialAccMatched = true;
+      }
+      if (cleanShopBank && (cleanShopBank.endsWith(cleanSlipAcc) || cleanSlipAcc.endsWith(cleanShopBank) || cleanShopBank.endsWith(cleanSlipAcc.slice(-4)))) {
+        partialAccMatched = true;
+      }
+    }
+  }
+
+  // กรณี 1: บัญชีตรงเต็มจำนวน (Full Account Match)
+  if (fullAccMatched) {
+    // ถ้ามีชื่อผู้รับในสลิปด้วย และมีชื่อร้านในระบบ แต่ชื่อในสลิปขัดแย้งกับร้านชัดเจน (เช่น บจก. เซเว่น, CP ALL หรือชื่อคนอื่น)
+    if (slipNameTokens.length > 0 && shopNameTokens.length > 0 && !nameMatched) {
+      return {
+        matched: false,
+        reason: `Receiver name conflict: Slip account matched but name (${slipReceiverName}) does not match shop (${shopAccountName})`,
+      };
+    }
+    return { matched: true, reason: `Matched Full Account (${cleanSlipAcc})` };
+  }
+
+  // กรณี 2: บัญชีตรงแบบ Masked (Partial Account Match เช่น 4 หลักท้าย)
+  if (partialAccMatched) {
+    // ถ้ามีชื่อในสลิปและชื่อร้านในระบบ ต้องให้ชื่อตรงกันด้วย เพื่อป้องกันเบอร์อื่นที่บังเอิญลงท้าย 4 ตัวเหมือนกัน
+    if (slipNameTokens.length > 0 && shopNameTokens.length > 0) {
+      if (nameMatched) {
+        return { matched: true, reason: `Matched Partial Account (${cleanSlipAcc}) and Name (${slipReceiverName})` };
+      } else {
+        return {
+          matched: false,
+          reason: `Receiver name mismatch: Masked account matched (${cleanSlipAcc}) but name (${slipReceiverName}) does not match shop (${shopAccountName})`,
+        };
+      }
+    }
+    return { matched: true, reason: `Matched Partial Account (${cleanSlipAcc})` };
+  }
+
+  // กรณี 3: ชื่อตรงกันอย่างชัดเจน (Name Matched)
+  if (nameMatched) {
+    // ถ้ามีเลขบัญชีเต็มรูปแบบแต่ไม่ตรงกับร้านเลย
+    if (cleanSlipAcc && cleanSlipAcc.length >= 9 && !fullAccMatched) {
+      return {
+        matched: false,
+        reason: `Receiver account conflict: Name matched but full account (${cleanSlipAcc}) does not match shop`,
+      };
+    }
+    return { matched: true, reason: `Matched Account Name (${slipReceiverName})` };
+  }
+
+  // กรณี 4: มีข้อมูลเลขบัญชีหรือชื่อ แต่ไม่ตรงกับของร้านเลย -> ปฏิเสธทันที
+  if (cleanSlipAcc || slipNameTokens.length > 0) {
+    return {
+      matched: false,
+      reason: `Receiver mismatch: Slip Acc (${cleanSlipAcc || "-"}), Name (${slipReceiverName || "-"}) does not match Shop PP (${cleanShopPP || "-"}), Bank (${cleanShopBank || "-"}), Name (${shopAccountName || "-"})`,
+    };
+  }
+
+  // กรณีที่ในสลิปไม่มีทั้งเลขบัญชีและชื่อ (เช่น QR ที่ไม่มี tag ผู้รับ)
+  return { matched: true, reason: "No receiver info found in slip (pending bank check)" };
+}
+
+/**
+ * แปลงฟอร์แมตวันที่และเวลาไทยในสลิปทุกรูปแบบให้เป็น Date Object มาตรฐานตามเวลาไทย (Asia/Bangkok, UTC+7)
+ * รองรับ: 13 ก.ย. 69, 13 ก.ย. 2569, 13 กันยายน 2567, 13/09/69, 13/09/2569, 2026-09-13, 13-09-2026 ฯลฯ
+ */
+function parseThaiSlipDateTime(
+  transferDate?: string,
+  transferTime?: string,
+  rawStr?: string
+): ParsedSlipDate | null {
+  const thaiMonths: Record<string, number> = {
+    "ม.ค.": 1, "มกราคม": 1, "jan": 1, "january": 1,
+    "ก.พ.": 2, "กุมภาพันธ์": 2, "feb": 2, "february": 2,
+    "มี.ค.": 3, "มีนาคม": 3, "mar": 3, "march": 3,
+    "เม.ย.": 4, "เมษายน": 4, "apr": 4, "april": 4,
+    "พ.ค.": 5, "พฤษภาคม": 5, "may": 5,
+    "มิ.ย.": 6, "มิถุนายน": 6, "jun": 6, "june": 6,
+    "ก.ค.": 7, "กรกฎาคม": 7, "jul": 7, "july": 7,
+    "ส.ค.": 8, "สิงหาคม": 8, "aug": 8, "august": 8,
+    "ก.ย.": 9, "กันยายน": 9, "sep": 9, "september": 9,
+    "ต.ค.": 10, "ตุลาคม": 10, "oct": 10, "october": 10,
+    "พ.ย.": 11, "พฤศจิกายน": 11, "nov": 11, "november": 11,
+    "ธ.ค.": 12, "ธันวาคม": 12, "dec": 12, "december": 12,
+  };
+
+  let year: number | null = null;
+  let month: number | null = null;
+  let day: number | null = null;
+  let hour = 0;
+  let minute = 0;
+  let second = 0;
+
+  const fullText = `${transferDate || ""} ${transferTime || ""} ${rawStr || ""}`.trim();
+  if (!fullText) return null;
+
+  // 1. ดึงข้อมูลเวลา (เช่น 14:30:15, 14:30, 14.30, 14:30 น.)
+  const timeMatch = fullText.match(/(\d{1,2})[:.](\d{2})(?:[:.](\d{2}))?/);
+  if (timeMatch) {
+    hour = parseInt(timeMatch[1], 10);
+    minute = parseInt(timeMatch[2], 10);
+    if (timeMatch[3]) second = parseInt(timeMatch[3], 10);
+  }
+
+  // 2. ตรวจจับชื่อเดือนภาษาไทย/อังกฤษ (เช่น "13 ก.ย. 69", "13 ก.ย. 2569", "13 กันยายน 2567")
+  for (const [mName, mVal] of Object.entries(thaiMonths)) {
+    const escaped = mName.replace(/\./g, "\\.");
+    const regex = new RegExp(`(\\d{1,2})\\s*(?:${escaped})\\s*(\\d{2,4})`, "i");
+    const match = fullText.match(regex);
+    if (match) {
+      day = parseInt(match[1], 10);
+      month = mVal;
+      let yr = parseInt(match[2], 10);
+      if (yr < 100) {
+        yr = yr >= 40 ? 2500 + yr - 543 : 2000 + yr;
+      } else if (yr > 2500) {
+        yr -= 543;
+      }
+      year = yr;
+      break;
+    }
+  }
+
+  // 3. ตรวจจับวันที่รูปแบบตัวเลข (เช่น YYYY-MM-DD, DD/MM/YYYY, DD-MM-YY)
+  if (!year || !month || !day) {
+    // Format YYYY-MM-DD
+    const isoMatch = fullText.match(/(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})/);
+    if (isoMatch) {
+      let yr = parseInt(isoMatch[1], 10);
+      if (yr > 2500) yr -= 543;
+      year = yr;
+      month = parseInt(isoMatch[2], 10);
+      day = parseInt(isoMatch[3], 10);
+    } else {
+      // Format DD/MM/YYYY หรือ DD/MM/YY
+      const dmyMatch = fullText.match(/(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})/);
+      if (dmyMatch) {
+        day = parseInt(dmyMatch[1], 10);
+        month = parseInt(dmyMatch[2], 10);
+        let yr = parseInt(dmyMatch[3], 10);
+        if (yr < 100) {
+          yr = yr >= 40 ? 2500 + yr - 543 : 2000 + yr;
+        } else if (yr > 2500) {
+          yr -= 543;
+        }
+        year = yr;
+      }
+    }
+  }
+
+  if (year && month && day && month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+    const pad = (n: number) => String(n).padStart(2, "0");
+    // กำหนด Timezone เวลาไทย (+07:00) เสมอ เพื่อป้องกัน UTC Server Drift
+    const isoStr = `${year}-${pad(month)}-${pad(day)}T${pad(hour)}:${pad(minute)}:${pad(second)}+07:00`;
+    const dateObj = new Date(isoStr);
+    if (!isNaN(dateObj.getTime())) {
+      return { year, month, day, hour, minute, second, dateObj };
+    }
+  }
+
+  return null;
+}
+
 export class CustomerPrismaRepository implements ICustomerRepository {
   // ใช้งาน Restaurant Repository ร่วมกัน
   private restaurantRepo = RestaurantRepositoryFactory.getRepository();
@@ -503,15 +762,33 @@ export class CustomerPrismaRepository implements ICustomerRepository {
     let shopProfile: { promptpayNumber?: string; bankAccountNumber?: string; bankName?: string; bankAccountName?: string } = {};
     let usedRefs: Set<string> | undefined;
     try {
-      const restaurant = await prisma.restaurant_data.findFirst({
-        select: { promptpay_number: true, bank_account_number: true, bank_name: true, promptpay_name: true, bank_account_name: true },
-      });
+      let restaurant: any = null;
+      if (order.restaurantId) {
+        restaurant = await prisma.restaurant_data.findUnique({
+          where: { res_id: Number(order.restaurantId) },
+          select: { promptpay_number: true, bank_account_number: true, bank_name: true, promptpay_name: true, bank_account_name: true },
+        });
+      }
+      if (!restaurant || (!restaurant.promptpay_number && !restaurant.bank_account_number)) {
+        restaurant = await prisma.restaurant_data.findFirst({
+          where: {
+            OR: [
+              { promptpay_number: { not: null } },
+              { bank_account_number: { not: null } },
+            ],
+          },
+          select: { promptpay_number: true, bank_account_number: true, bank_name: true, promptpay_name: true, bank_account_name: true },
+        });
+      }
+
       shopProfile = {
         promptpayNumber: restaurant?.promptpay_number || undefined,
         bankAccountNumber: restaurant?.bank_account_number || undefined,
         bankName: restaurant?.bank_name || undefined,
         bankAccountName: restaurant?.promptpay_name || restaurant?.bank_account_name || undefined,
       };
+
+      console.log(`[Slip Verification] 🏪 Shop Profile loaded: PP=${shopProfile.promptpayNumber || "-"}, BankAcc=${shopProfile.bankAccountNumber || "-"}, Bank=${shopProfile.bankName || "-"}, Name=${shopProfile.bankAccountName || "-"}`);
 
       const paidSlips = await prisma.payments.findMany({
         where: { status: "paid", transaction_ref: { not: null } },
@@ -525,117 +802,259 @@ export class CustomerPrismaRepository implements ICustomerRepository {
     const orderCreatedAt = order.createdAt ? new Date(order.createdAt) : undefined;
     const requiredAmount: number = Number(order.total || 0);
 
-    // Phase 1: การสกัดข้อมูลสลิปด้วย Google Gemini AI Vision และตรวจสอบโดย Backend
+    const shopPP = shopProfile.promptpayNumber;
+    const shopBankAcc = shopProfile.bankAccountNumber;
+    const shopAccountName = shopProfile.bankAccountName;
+
+    // =========================================================================
+    // ขั้นตอนที่ 1: ตรวจสอบด้วย Gemini 3.6 flash (เท่านั้น)
+    // - ตรวจว่าเป็นสลิป
+    // - อ่านยอดเงิน (ต้องตรงกับยอดคำสั่งซื้อเป๊ะๆ)
+    // - อ่านวันที่ และ เวลา (ต้องเป็นปัจจุบันและสอดคล้อง ไม่เกิน 24 ชม. ไม่อยู่ในอนาคต)
+    // - อ่านรหัสอ้างอิงและตรวจสลิปซ้ำ
+    // - อ่านธนาคารและบัญชี/ชื่อปลายทาง (ต้องตรงกับร้านค้าในฐานข้อมูล)
+    // *หาก Gemini ตอบกลับ Status 429 ให้สลับไปขั้นตอนที่ 2: BOT Mini QR Code ทันที*
+    // =========================================================================
     console.log(`\n================== [Slip Verification: Order #${orderId}] ==================`);
-    console.log(`[Slip Verification] 🤖 Phase 1: Extracting slip data via [Google Gemini AI Vision]...`);
+    console.log(`[Slip Verification] 🤖 ขั้นตอนที่ 1: ตรวจสอบสลิปด้วย Gemini 3.6 flash (เท่านั้น)...`);
 
-    let extracted = await GeminiSlipService.extractSlipData(fileBase64);
+    let geminiData = await GeminiSlipService.extractSlipData(fileBase64);
+    let passedStep1or2 = false;
+    let detectedTxRef = "";
 
-    // 💡 Fallback: ถ้า Gemini AI ติด 429 Rate Limit หรือเกิด Error ให้สลับไปถอดรหัส BOT Mini QR Code ในเครื่องทันที
-    if (extracted.is_api_error) {
-      console.log(`[Slip Verification] ⚠️ Gemini AI unavailable (${extracted.error_message}) -> Attempting Local BOT Mini QR Decoder fallback...`);
-      try {
-        const qrScan = await SlipPrescreenerService.extractQrFromBase64(fileBase64);
-        if (qrScan?.payload) {
-          const qrData = parseEmvSlipQr(qrScan.payload);
-          const isSlipStandard =
-            qrData.format === "BOT_MINI_QR" ||
-            qrData.format === "PROMPTPAY_EMV" ||
-            qrScan.payload.startsWith("000201") ||
-            qrScan.payload.startsWith("0045") ||
-            qrScan.payload.startsWith("0038") ||
-            qrScan.payload.includes("000001") ||
-            qrScan.payload.includes("A000000677");
-
-          if (isSlipStandard) {
-            console.log(`[Slip Verification] ✅ Successfully extracted slip data via Local BOT Mini QR (Engine: ${qrScan.engine})`);
-            extracted = {
-              is_bank_slip: true,
-              amount: qrData.amount,
-              transfer_date: qrData.rawDateStr || (qrData.transferDate ? qrData.transferDate.toISOString().slice(0, 10) : undefined),
-              datetime_str: qrData.rawDateStr,
-              receiver_bank: qrData.receivingBank,
-              receiver_account: qrData.receiverAccount,
-              transaction_ref: qrData.transactionRef,
-              is_api_error: false,
-            };
-          }
-        }
-      } catch (qrErr) {
-        console.warn("[Slip Verification] Local QR fallback error:", qrErr);
+    if (!geminiData.is_api_error) {
+      // 1.1 ตรวจสอบว่าเป็นสลิปธนาคารจริงหรือไม่
+      if (!geminiData.is_bank_slip) {
+        console.warn(`[Slip Verification - Step 1] ❌ ไม่ใช่รูปสลิปธนาคาร`);
+        return {
+          orderId,
+          status: "failed",
+          httpStatus: 400,
+          message: "รูปภาพดังกล่าวไม่ใช่สลิปโอนเงินของธนาคาร กรุณาแนบรูปภาพสลิปที่ถูกต้อง",
+          isPaid: false,
+        };
       }
-    }
 
-    if (extracted.is_api_error) {
-      console.warn(`[Slip Verification] ❌ Both Gemini AI and Local QR fallback failed: ${extracted.error_message}`);
-      return {
-        orderId,
-        status: "error",
-        httpStatus: 503,
-        message: extracted.error_message || "เกิดข้อผิดพลาดในการตรวจสอบสลิป กรุณาลองใหม่อีกครั้ง",
-        isPaid: false,
-      };
-    }
+      // 1.2 ตรวจสอบยอดเงิน (ต้องตรงกับยอดชำระเป๊ะๆ ไม่อนุญาตทั้งยอดขาดหรือเกิน)
+      const slipAmount: number = Number(geminiData.amount || 0);
+      console.log(`[Slip Verification - Step 1] 💵 ยอดเงินในสลิป: ${slipAmount} บาท (ยอดที่ต้องชำระ: ${requiredAmount} บาท)`);
+      if (slipAmount <= 0 || Math.abs(slipAmount - requiredAmount) > 0.01) {
+        console.warn(`[Slip Verification - Step 1] ❌ ยอดเงินไม่ตรง: ${slipAmount} != ${requiredAmount}`);
+        return {
+          orderId,
+          status: "failed",
+          httpStatus: 400,
+          message: `ยอดเงินในสลิป (${slipAmount > 0 ? slipAmount.toLocaleString() : "0"} บาท) ไม่ตรงกับยอดที่ต้องชำระ (${requiredAmount.toLocaleString()} บาท)`,
+          isPaid: false,
+        };
+      }
 
-    // 1. ตรวจสอบว่าเป็นสลิปธนาคารจริงหรือไม่
-    if (!extracted.is_bank_slip) {
-      console.warn(`[Slip Verification] ❌ Not a bank slip image`);
-      return {
-        orderId,
-        status: "failed",
-        httpStatus: 400,
-        message: "รูปภาพดังกล่าวไม่ใช่สลิปโอนเงินของธนาคาร กรุณาแนบรูปภาพสลิปที่ถูกต้อง",
-        isPaid: false,
-      };
-    }
+      // 1.3 ตรวจสอบบัญชีและชื่อผู้รับปลายทาง (ต้องตรงกับของร้านค้าในฐานข้อมูล)
+      console.log(`[Slip Verification - Step 1] 🏦 ตรวจสอบผู้รับ: เลขบัญชี (${geminiData.receiver_account || "-"}), ชื่อ (${geminiData.receiver_name || "-"}) vs ร้านค้า: PP (${shopPP || "-"}), BankAcc (${shopBankAcc || "-"}), ชื่อ (${shopAccountName || "-"})`);
+      const receiverMatch = isReceiverMatch(
+        geminiData.receiver_account,
+        geminiData.receiver_name,
+        shopPP,
+        shopBankAcc,
+        shopAccountName
+      );
 
-    // 2. ตรวจสอบยอดเงินในสลิปโดย Backend Logic
-    const slipAmount: number = Number(extracted.amount || 0);
-    console.log(`[Slip Verification] 💵 Checking Amount: Slip (${slipAmount > 0 ? slipAmount : "Pending EasySlip check"} THB) vs Required (${requiredAmount} THB)`);
-    if (slipAmount > 0 && requiredAmount > 0 && slipAmount < requiredAmount) {
-      console.warn(`[Slip Verification] ❌ Amount mismatch: Slip (${slipAmount}) < Required (${requiredAmount})`);
-      return {
-        orderId,
-        status: "failed",
-        httpStatus: 400,
-        message: `ยอดเงินในสลิป (${slipAmount.toLocaleString()} บาท) ไม่ตรงกับยอดที่ต้องชำระ (${requiredAmount.toLocaleString()} บาท)`,
-        isPaid: false,
-      };
-    }
+      if (!receiverMatch.matched) {
+        console.warn(`[Slip Verification - Step 1] ❌ บัญชีหรือชื่อผู้รับไม่ตรงกับร้าน: ${receiverMatch.reason}`);
+        return {
+          orderId,
+          status: "failed",
+          httpStatus: 400,
+          message: "สลิปนี้ไม่ได้โอนเข้าบัญชีของร้านค้า (บัญชีหรือชื่อผู้รับในสลิปไม่ตรงกับบัญชีของร้านค้า)",
+          isPaid: false,
+        };
+      }
 
-    // 3. ตรวจสอบธนาคารและบัญชีปลายทางตรงกับร้านค้าหรือไม่โดย Backend Logic
-    const normalizeAccount = (s?: string) => (s || "").replace(/[-\s]/g, "").replace(/^0066/, "0").trim();
-    const shopPP = normalizeAccount(shopProfile.promptpayNumber);
-    const shopBankAcc = normalizeAccount(shopProfile.bankAccountNumber);
-    const shopAccountName = (shopProfile.bankAccountName || "").trim().toLowerCase();
-    const slipReceiverAcc = normalizeAccount(extracted.receiver_account);
-    const slipReceiverName = (extracted.receiver_name || "").trim().toLowerCase();
-
-    console.log(`[Slip Verification] 🏦 Checking Receiver: Slip Acc (${slipReceiverAcc || "-"}), Name (${slipReceiverName || "-"}) vs Shop PP (${shopPP || "-"}), BankAcc (${shopBankAcc || "-"}), ShopName (${shopAccountName || "-"})`);
-
-    if (slipReceiverAcc && (shopPP || shopBankAcc)) {
-      const matchPP = shopPP && (slipReceiverAcc.endsWith(shopPP.slice(-6)) || shopPP.endsWith(slipReceiverAcc.slice(-6)));
-      const matchBank = shopBankAcc && (slipReceiverAcc.endsWith(shopBankAcc.slice(-6)) || shopBankAcc.endsWith(slipReceiverAcc.slice(-6)));
-      if (!matchPP && !matchBank) {
-        const matchName = shopAccountName && slipReceiverName && (shopAccountName.includes(slipReceiverName) || slipReceiverName.includes(shopAccountName));
-        if (!matchName) {
-          console.warn(`[Slip Verification] ❌ Receiver mismatch: Slip (${slipReceiverAcc}) not matched with Shop PP (${shopPP}) / Bank (${shopBankAcc})`);
+      // 1.4 ตรวจสอบธนาคารปลายทาง (หากมี)
+      const shopBankCode = getBankCodeByName(shopProfile.bankName);
+      if (geminiData.receiver_bank && shopBankCode && /^\d{3}$/.test(geminiData.receiver_bank)) {
+        if (geminiData.receiver_bank !== shopBankCode) {
+          console.warn(`[Slip Verification - Step 1] ❌ ธนาคารปลายทางไม่ตรง: ${geminiData.receiver_bank} != ${shopBankCode}`);
           return {
             orderId,
             status: "failed",
             httpStatus: 400,
-            message: "บัญชีผู้รับเงินในสลิปไม่ตรงกับบัญชีของร้านค้า กรุณาตรวจสอบหมายเลขบัญชีผู้รับ",
+            message: "ธนาคารปลายทางในสลิปไม่ตรงกับธนาคารของร้านค้า กรุณาตรวจสอบและลองใหม่อีกครั้ง",
             isPaid: false,
           };
         }
       }
+
+      // 1.5 ตรวจสอบวันที่และเวลาในสลิป
+      const parsedSlip = parseThaiSlipDateTime(
+        geminiData.transfer_date,
+        geminiData.transfer_time,
+        geminiData.datetime_str
+      );
+      if (parsedSlip) {
+        const now = new Date();
+        const bkkFormatter = new Intl.DateTimeFormat("en-US", {
+          timeZone: "Asia/Bangkok",
+          year: "numeric",
+          month: "numeric",
+          day: "numeric",
+          hour: "numeric",
+          minute: "numeric",
+          second: "numeric",
+          hour12: false,
+        });
+        const parts = bkkFormatter.formatToParts(now);
+        const bkkParts: Record<string, number> = {};
+        parts.forEach((p) => {
+          if (p.type !== "literal") bkkParts[p.type] = parseInt(p.value, 10);
+        });
+
+        const todayYear = bkkParts.year || now.getFullYear();
+        const todayMonth = bkkParts.month || now.getMonth() + 1;
+        const todayDay = bkkParts.day || now.getDate();
+
+        const slipCalendarDate = new Date(parsedSlip.year, parsedSlip.month - 1, parsedSlip.day).getTime();
+        const todayCalendarDate = new Date(todayYear, todayMonth - 1, todayDay).getTime();
+        const diffDays = Math.round((todayCalendarDate - slipCalendarDate) / (1000 * 60 * 60 * 24));
+
+        if (diffDays < 0) {
+          return {
+            orderId,
+            status: "failed",
+            httpStatus: 400,
+            message: "วันที่ในสลิปไม่ถูกต้อง (พบวันที่ในอนาคต)",
+            isPaid: false,
+          };
+        }
+        if (diffDays > 1) {
+          return {
+            orderId,
+            status: "failed",
+            httpStatus: 400,
+            message: "สลิปโอนเงินหมดอายุ (กรุณาใช้สลิปที่โอนในวันเดียวกับการสั่งซื้อ)",
+            isPaid: false,
+          };
+        }
+
+        const diffMinutes = (now.getTime() - parsedSlip.dateObj.getTime()) / (1000 * 60);
+        if (diffMinutes < -30) {
+          return {
+            orderId,
+            status: "failed",
+            httpStatus: 400,
+            message: "เวลาในสลิปไม่ถูกต้อง (พบเวลาในอนาคต)",
+            isPaid: false,
+          };
+        }
+        if (diffMinutes > 24 * 60) {
+          return {
+            orderId,
+            status: "failed",
+            httpStatus: 400,
+            message: "สลิปโอนเงินหมดอายุ (กรุณาใช้สลิปที่โอนในวันเดียวกับการสั่งซื้อ)",
+            isPaid: false,
+          };
+        }
+      }
+
+      // 1.6 ตรวจสอบรหัสอ้างอิงและตรวจสลิปซ้ำ
+      detectedTxRef = geminiData.transaction_ref?.trim() || "";
+      if (detectedTxRef && usedRefs && usedRefs.has(detectedTxRef)) {
+        console.warn(`[Slip Verification - Step 1] ❌ พบสลิปซ้ำ (Ref: ${detectedTxRef})`);
+        return {
+          orderId,
+          status: "failed",
+          httpStatus: 400,
+          message: "สลิปนี้เคยถูกใช้งานแล้ว กรุณาใช้สลิปใหม่",
+          isPaid: false,
+        };
+      }
+
+      passedStep1or2 = true;
+      console.log(`[Slip Verification] ✅ ขั้นตอนที่ 1 (Gemini 3.6 Flash) ผ่านเงื่อนไขเรียบร้อยแล้ว (Amount: ${slipAmount}, Ref: ${detectedTxRef || "-"})`);
+    } else {
+      console.log(`[Slip Verification] ⚠️ Gemini 3.6 Flash ตอบกลับ Status 429 / Rate Limit (${geminiData.error_message}) -> สลับไปขั้นตอนที่ 2: ถอดรหัส BOT Mini QR Code ทันที...`);
     }
 
-    // ตรวจสอบรหัสธนาคารปลายทาง (กรณีถอดรหัสจาก BOT Mini QR)
-    const shopBankCode = getBankCodeByName(shopProfile.bankName);
-    if (extracted.receiver_bank && shopBankCode && /^\d{3}$/.test(extracted.receiver_bank)) {
-      if (extracted.receiver_bank !== shopBankCode) {
-        console.warn(`[Slip Verification] ❌ Bank code mismatch: Slip (${extracted.receiver_bank}) != Shop (${shopBankCode})`);
+    // =========================================================================
+    // ขั้นตอนที่ 2: ตรวจสอบด้วย BOT Mini QR Code (เมื่อ Gemini 3.6 Flash ตอบกลับ status 429)
+    // - ตรวจว่าเป็นสลิป
+    // - อ่านวันที่และเวลา เปรียบเทียบกับปัจจุบัน
+    // - อ่านรหัสอ้างอิงและตรวจสลิปซ้ำ
+    // - อ่านธนาคารและบัญชีปลายทางว่าตรงกับบัญชีรับเงินในฐานข้อมูล
+    // =========================================================================
+    if (!passedStep1or2) {
+      console.log(`[Slip Verification] 🔍 ขั้นตอนที่ 2: ตรวจสอบสลิปด้วย BOT Mini QR Code บนสลิปโดยตรง...`);
+      let qrScan: any = null;
+      try {
+        qrScan = await SlipPrescreenerService.extractQrFromBase64(fileBase64);
+      } catch (qrErr) {
+        console.warn("[Slip Verification - Step 2] QR Scan error:", qrErr);
+      }
+
+      if (!qrScan?.payload) {
+        console.warn(`[Slip Verification - Step 2] ❌ ไม่พบ QR Code ในรูปภาพสลิป`);
+        return {
+          orderId,
+          status: "failed",
+          httpStatus: 400,
+          message: "ไม่พบ QR Code ในรูปภาพ กรุณาอัปโหลดรูปสลิปจากแอปธนาคารให้ชัดเจน",
+          isPaid: false,
+        };
+      }
+
+      const qrData = parseEmvSlipQr(qrScan.payload);
+      const isSlipStandard =
+        qrData.format === "BOT_MINI_QR" ||
+        qrData.format === "PROMPTPAY_EMV" ||
+        qrScan.payload.startsWith("000201") ||
+        qrScan.payload.startsWith("0045") ||
+        qrScan.payload.startsWith("0038") ||
+        qrScan.payload.includes("000001") ||
+        qrScan.payload.includes("A000000677");
+
+      if (!isSlipStandard) {
+        console.warn(`[Slip Verification - Step 2] ❌ ไม่ใช่สลิปธนาคารตามมาตรฐาน BOT Mini QR`);
+        return {
+          orderId,
+          status: "failed",
+          httpStatus: 400,
+          message: "รูปภาพดังกล่าวไม่ใช่สลิปโอนเงินของธนาคาร กรุณาใช้รูปสลิปโอนเงินจริง",
+          isPaid: false,
+        };
+      }
+
+      // 2.1 อ่านรหัสอ้างอิงและตรวจสลิปซ้ำ
+      detectedTxRef = qrData.transactionRef?.trim() || "";
+      if (detectedTxRef && usedRefs && usedRefs.has(detectedTxRef)) {
+        console.warn(`[Slip Verification - Step 2] ❌ พบสลิปซ้ำ (Ref: ${detectedTxRef})`);
+        return {
+          orderId,
+          status: "failed",
+          httpStatus: 400,
+          message: "สลิปนี้เคยถูกใช้งานแล้ว กรุณาใช้สลิปใหม่",
+          isPaid: false,
+        };
+      }
+
+      // 2.2 อ่านยอดเงิน (หากมีระบุใน Mini QR Tag 54 หรือ Tag 51)
+      if (qrData.amount !== undefined && qrData.amount > 0) {
+        if (Math.abs(qrData.amount - requiredAmount) > 0.01) {
+          console.warn(`[Slip Verification - Step 2] ❌ ยอดเงินไม่ตรง: ${qrData.amount} != ${requiredAmount}`);
+          return {
+            orderId,
+            status: "failed",
+            httpStatus: 400,
+            message: `ยอดเงินในสลิป (${qrData.amount.toLocaleString()} บาท) ไม่ตรงกับยอดที่ต้องชำระ (${requiredAmount.toLocaleString()} บาท)`,
+            isPaid: false,
+          };
+        }
+      }
+
+      // 2.3 อ่านธนาคารปลายทางและบัญชีผู้รับ เปรียบเทียบกับบัญชีรับเงินของร้านค้าในฐานข้อมูล
+      const shopBankCode = getBankCodeByName(shopProfile.bankName);
+      if (qrData.receivingBank && shopBankCode && qrData.receivingBank !== shopBankCode) {
+        console.warn(`[Slip Verification - Step 2] ❌ ธนาคารปลายทางไม่ตรง: ${qrData.receivingBank} != ${shopBankCode}`);
         return {
           orderId,
           status: "failed",
@@ -644,239 +1063,64 @@ export class CustomerPrismaRepository implements ICustomerRepository {
           isPaid: false,
         };
       }
-    }
 
-interface ParsedSlipDate {
-  year: number;
-  month: number;
-  day: number;
-  hour: number;
-  minute: number;
-  second: number;
-  dateObj: Date;
-}
-
-/**
- * แปลงฟอร์แมตวันที่และเวลาไทยในสลิปทุกรูปแบบให้เป็น Date Object มาตรฐานตามเวลาไทย (Asia/Bangkok, UTC+7)
- * รองรับ: 13 ก.ย. 69, 13 ก.ย. 2569, 13 กันยายน 2567, 13/09/69, 13/09/2569, 2026-09-13, 13-09-2026 ฯลฯ
- */
-function parseThaiSlipDateTime(
-  transferDate?: string,
-  transferTime?: string,
-  rawStr?: string
-): ParsedSlipDate | null {
-  const thaiMonths: Record<string, number> = {
-    "ม.ค.": 1, "มกราคม": 1, "jan": 1, "january": 1,
-    "ก.พ.": 2, "กุมภาพันธ์": 2, "feb": 2, "february": 2,
-    "มี.ค.": 3, "มีนาคม": 3, "mar": 3, "march": 3,
-    "เม.ย.": 4, "เมษายน": 4, "apr": 4, "april": 4,
-    "พ.ค.": 5, "พฤษภาคม": 5, "may": 5,
-    "มิ.ย.": 6, "มิถุนายน": 6, "jun": 6, "june": 6,
-    "ก.ค.": 7, "กรกฎาคม": 7, "jul": 7, "july": 7,
-    "ส.ค.": 8, "สิงหาคม": 8, "aug": 8, "august": 8,
-    "ก.ย.": 9, "กันยายน": 9, "sep": 9, "september": 9,
-    "ต.ค.": 10, "ตุลาคม": 10, "oct": 10, "october": 10,
-    "พ.ย.": 11, "พฤศจิกายน": 11, "nov": 11, "november": 11,
-    "ธ.ค.": 12, "ธันวาคม": 12, "dec": 12, "december": 12,
-  };
-
-  let year: number | null = null;
-  let month: number | null = null;
-  let day: number | null = null;
-  let hour = 0;
-  let minute = 0;
-  let second = 0;
-
-  const fullText = `${transferDate || ""} ${transferTime || ""} ${rawStr || ""}`.trim();
-  if (!fullText) return null;
-
-  // 1. ดึงข้อมูลเวลา (เช่น 14:30:15, 14:30, 14.30, 14:30 น.)
-  const timeMatch = fullText.match(/(\d{1,2})[:.](\d{2})(?:[:.](\d{2}))?/);
-  if (timeMatch) {
-    hour = parseInt(timeMatch[1], 10);
-    minute = parseInt(timeMatch[2], 10);
-    if (timeMatch[3]) second = parseInt(timeMatch[3], 10);
-  }
-
-  // 2. ตรวจจับชื่อเดือนภาษาไทย/อังกฤษ (เช่น "13 ก.ย. 69", "13 ก.ย. 2569", "13 กันยายน 2567")
-  for (const [mName, mVal] of Object.entries(thaiMonths)) {
-    const escaped = mName.replace(/\./g, "\\.");
-    const regex = new RegExp(`(\\d{1,2})\\s*(?:${escaped})\\s*(\\d{2,4})`, "i");
-    const match = fullText.match(regex);
-    if (match) {
-      day = parseInt(match[1], 10);
-      month = mVal;
-      let yr = parseInt(match[2], 10);
-      if (yr < 100) {
-        yr = yr >= 40 ? 2500 + yr - 543 : 2000 + yr;
-      } else if (yr > 2500) {
-        yr -= 543;
-      }
-      year = yr;
-      break;
-    }
-  }
-
-  // 3. ตรวจจับวันที่รูปแบบตัวเลข (เช่น YYYY-MM-DD, DD/MM/YYYY, DD-MM-YY)
-  if (!year || !month || !day) {
-    // Format YYYY-MM-DD
-    const isoMatch = fullText.match(/(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})/);
-    if (isoMatch) {
-      let yr = parseInt(isoMatch[1], 10);
-      if (yr > 2500) yr -= 543;
-      year = yr;
-      month = parseInt(isoMatch[2], 10);
-      day = parseInt(isoMatch[3], 10);
-    } else {
-      // Format DD/MM/YYYY หรือ DD/MM/YY
-      const dmyMatch = fullText.match(/(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})/);
-      if (dmyMatch) {
-        day = parseInt(dmyMatch[1], 10);
-        month = parseInt(dmyMatch[2], 10);
-        let yr = parseInt(dmyMatch[3], 10);
-        if (yr < 100) {
-          yr = yr >= 40 ? 2500 + yr - 543 : 2000 + yr;
-        } else if (yr > 2500) {
-          yr -= 543;
+      if (qrData.receiverAccount) {
+        const qrReceiverMatch = isReceiverMatch(
+          qrData.receiverAccount,
+          null,
+          shopPP,
+          shopBankAcc,
+          shopAccountName
+        );
+        if (!qrReceiverMatch.matched) {
+          console.warn(`[Slip Verification - Step 2] ❌ บัญชีปลายทางไม่ตรงกับร้าน: ${qrReceiverMatch.reason}`);
+          return {
+            orderId,
+            status: "failed",
+            httpStatus: 400,
+            message: "สลิปนี้ไม่ได้โอนเข้าบัญชีของร้านค้า (บัญชีผู้รับในสลิปไม่ตรงกับบัญชีของร้านค้า)",
+            isPaid: false,
+          };
         }
-        year = yr;
-      }
-    }
-  }
-
-  if (year && month && day && month >= 1 && month <= 12 && day >= 1 && day <= 31) {
-    const pad = (n: number) => String(n).padStart(2, "0");
-    // กำหนด Timezone เวลาไทย (+07:00) เสมอ เพื่อป้องกัน UTC Server Drift
-    const isoStr = `${year}-${pad(month)}-${pad(day)}T${pad(hour)}:${pad(minute)}:${pad(second)}+07:00`;
-    const dateObj = new Date(isoStr);
-    if (!isNaN(dateObj.getTime())) {
-      return { year, month, day, hour, minute, second, dateObj };
-    }
-  }
-
-  return null;
-}
-
-    // 4. ตรวจสอบวันที่และเวลาในสลิปสอดคล้องกับปัจจุบันหรือไม่โดย Backend Logic
-    console.log(`[Slip Verification] 🕒 Checking Date/Time: Date (${extracted.transfer_date || "-"}), Time (${extracted.transfer_time || "-"}), Raw (${extracted.datetime_str || "-"})`);
-
-    const parsedSlip = parseThaiSlipDateTime(
-      extracted.transfer_date,
-      extracted.transfer_time,
-      extracted.datetime_str
-    );
-
-    if (parsedSlip) {
-      const now = new Date();
-      // ดึงวัน/เดือน/ปี ปัจจุบันตามเวลาประเทศไทย (Asia/Bangkok)
-      const bkkFormatter = new Intl.DateTimeFormat("en-US", {
-        timeZone: "Asia/Bangkok",
-        year: "numeric",
-        month: "numeric",
-        day: "numeric",
-        hour: "numeric",
-        minute: "numeric",
-        second: "numeric",
-        hour12: false,
-      });
-      const parts = bkkFormatter.formatToParts(now);
-      const bkkParts: Record<string, number> = {};
-      parts.forEach((p) => {
-        if (p.type !== "literal") bkkParts[p.type] = parseInt(p.value, 10);
-      });
-
-      const todayYear = bkkParts.year || now.getFullYear();
-      const todayMonth = bkkParts.month || now.getMonth() + 1;
-      const todayDay = bkkParts.day || now.getDate();
-
-      console.log(`[Slip Verification] 📅 Slip Date: ${parsedSlip.year}-${parsedSlip.month}-${parsedSlip.day} ${parsedSlip.hour}:${parsedSlip.minute} | Bangkok Today: ${todayYear}-${todayMonth}-${todayDay}`);
-
-      // 4.1 ตรวจสอบวันที่ (Calendar Date Check)
-      const slipCalendarDate = new Date(parsedSlip.year, parsedSlip.month - 1, parsedSlip.day).getTime();
-      const todayCalendarDate = new Date(todayYear, todayMonth - 1, todayDay).getTime();
-      const diffDays = Math.round((todayCalendarDate - slipCalendarDate) / (1000 * 60 * 60 * 24));
-
-      if (diffDays < 0) {
-        console.warn(`[Slip Verification] ❌ Slip date is in future: ${parsedSlip.year}-${parsedSlip.month}-${parsedSlip.day} (Diff: ${diffDays} days)`);
-        return {
-          orderId,
-          status: "failed",
-          httpStatus: 400,
-          message: "วันที่ในสลิปไม่ถูกต้อง (พบวันที่ในอนาคต)",
-          isPaid: false,
-        };
       }
 
-      if (diffDays > 1) {
-        console.warn(`[Slip Verification] ❌ Slip date expired: ${parsedSlip.year}-${parsedSlip.month}-${parsedSlip.day} (${diffDays} days ago)`);
-        return {
-          orderId,
-          status: "failed",
-          httpStatus: 400,
-          message: "สลิปโอนเงินหมดอายุ (กรุณาใช้สลิปที่โอนในวันเดียวกับการสั่งซื้อ)",
-          isPaid: false,
-        };
-      }
-
-      // 4.2 ตรวจสอบเวลา (Time Check) — ให้ความยืดหยุ่นเวลานาฬิกาลูกค้าล่วงหน้าได้ 30 นาที
-      const diffMinutes = (now.getTime() - parsedSlip.dateObj.getTime()) / (1000 * 60);
-
-      if (diffMinutes < -30) {
-        console.warn(`[Slip Verification] ❌ Slip time is in future: ${diffMinutes.toFixed(1)} minutes ahead`);
-        return {
-          orderId,
-          status: "failed",
-          httpStatus: 400,
-          message: "เวลาในสลิปไม่ถูกต้อง (พบเวลาในอนาคต)",
-          isPaid: false,
-        };
-      }
-
-      if (diffMinutes > 24 * 60) {
-        console.warn(`[Slip Verification] ❌ Slip time expired: ${(diffMinutes / 60).toFixed(1)} hours ago`);
-        return {
-          orderId,
-          status: "failed",
-          httpStatus: 400,
-          message: "สลิปโอนเงินหมดอายุ (กรุณาใช้สลิปที่โอนในวันเดียวกับการสั่งซื้อ)",
-          isPaid: false,
-        };
-      }
-    }
-
-    console.log(`[Slip Verification] ✅ Phase 1 Backend Validation PASSED (Amount: ${slipAmount} THB, Receiver: ${extracted.receiver_account || extracted.receiver_name || "Matched"})`);
-
-    // Phase 2: ตรวจสอบหมายเลขอ้างอิงสลิปซ้ำ (Duplicate Reference Check)
-    console.log(`[Slip Verification] 🔍 Phase 2: Checking Duplicate Slip References...`);
-    let detectedTxRef = extracted.transaction_ref?.trim() || "";
-
-    // หาก AI ไม่พบ Ref เต็มรูปแบบ ลองถอดรหัสจาก Mini QR Code ในสลิป
-    if (!detectedTxRef) {
-      try {
-        const qrScan = await SlipPrescreenerService.extractQrFromBase64(fileBase64);
-        if (qrScan?.payload) {
-          const parsed = parseEmvSlipQr(qrScan.payload);
-          detectedTxRef = parsed.transactionRef || "";
+      // 2.4 อ่านวันที่และเวลา เปรียบเทียบกับปัจจุบัน
+      if (qrData.transferDate) {
+        const transferTime = qrData.transferDate.getTime();
+        const nowTime = Date.now();
+        const diffHours = (nowTime - transferTime) / (1000 * 60 * 60);
+        if (diffHours < -2) {
+          console.warn(`[Slip Verification - Step 2] ❌ วันที่และเวลาในสลิปอยู่ในอนาคต`);
+          return {
+            orderId,
+            status: "failed",
+            httpStatus: 400,
+            message: "วันที่และเวลาในสลิปไม่ถูกต้อง (พบเวลาในอนาคต)",
+            isPaid: false,
+          };
         }
-      } catch (qrErr) {
-        console.warn("[Slip Verification] Local QR scan warning:", qrErr);
+        if (diffHours > 24) {
+          console.warn(`[Slip Verification - Step 2] ❌ สลิปหมดอายุ: ${diffHours.toFixed(1)} ชั่วโมงที่แล้ว`);
+          return {
+            orderId,
+            status: "failed",
+            httpStatus: 400,
+            message: "สลิปโอนเงินหมดอายุ (กรุณาใช้สลิปที่โอนในวันเดียวกับการสั่งซื้อ)",
+            isPaid: false,
+          };
+        }
       }
+
+      passedStep1or2 = true;
+      console.log(`[Slip Verification] ✅ ขั้นตอนที่ 2 (BOT Mini QR Code) ผ่านเงื่อนไขเรียบร้อยแล้ว (Ref: ${detectedTxRef || "-"})`);
     }
 
-    if (detectedTxRef && usedRefs && usedRefs.has(detectedTxRef)) {
-      console.warn(`[Slip Verification] ❌ Duplicate slip detected (Ref: ${detectedTxRef})`);
-      return {
-        orderId,
-        status: "failed",
-        httpStatus: 400,
-        message: "สลิปนี้เคยถูกใช้งานแล้ว กรุณาใช้สลิปใหม่",
-        isPaid: false,
-      };
-    }
-    console.log(`[Slip Verification] ✅ Duplicate check PASSED (TxRef: ${detectedTxRef || "Unique"})`);
-
-    // Phase 3: ตรวจสอบข้อมูลสลิปกับระบบธนาคารผ่าน EasySlip API v2
-    console.log(`[Slip Verification] 🌐 Phase 3: Calling [EasySlip API v2 Engine] for official bank verification...`);
+    // =========================================================================
+    // ขั้นตอนที่ 3: ตรวจสอบด้วย EasySlip API v2
+    // (เมื่อผ่านเงื่อนไขตรวจว่าเป็นสลิป อ่านวันที่เป็นปัจจุบัน อ่านเวลาสอดคล้องกับปัจจุบัน
+    // อ่านรหัสอ้างอิงไม่ซ้ำ และอ่านธนาคารปลายทางตรงกับบัญชีรับเงินในฐานข้อมูล ค่อยไปตรวจด้วย EasySlip)
+    // =========================================================================
+    console.log(`[Slip Verification] 🌐 ขั้นตอนที่ 3: ส่งตรวจสอบกับระบบธนาคารผ่าน [EasySlip API v2 Engine]...`);
     const easyslipKey = process.env.EASYSLIP_API_KEY;
     if (!easyslipKey) {
       console.warn("[Slip Verification - EasySlip] ⚠️ EASYSLIP_API_KEY not set — skipping bank verification");
@@ -947,15 +1191,15 @@ function parseThaiSlipDateTime(
       };
     }
 
-    // ตรวจสอบยอดเงินจากผลลัพธ์ธนาคาร
+    // ตรวจสอบยอดเงินจากผลลัพธ์ธนาคาร (ต้องตรงกับยอดคำสั่งซื้อทุกกรณี ไม่อนุญาตทั้งยอดน้อยกว่าหรือมากกว่า)
     const amountInSlip: number =
       easyslipResult?.data?.amount?.amount ??
       easyslipResult?.data?.amountInSlip ??
       easyslipResult?.data?.amount ??
       0;
 
-    if (amountInSlip > 0 && requiredAmount > 0 && amountInSlip < requiredAmount) {
-      console.warn(`[Slip Verification - EasySlip] ❌ Amount insufficient: Paid ${amountInSlip} THB, Required ${requiredAmount} THB`);
+    if (amountInSlip <= 0 || (requiredAmount > 0 && Math.abs(amountInSlip - requiredAmount) > 0.01)) {
+      console.warn(`[Slip Verification - EasySlip] ❌ Bank amount mismatch: Paid ${amountInSlip} THB, Required ${requiredAmount} THB`);
       return {
         orderId,
         status: "failed",
@@ -966,28 +1210,40 @@ function parseThaiSlipDateTime(
       };
     }
 
-    // ตรวจสอบเลขบัญชีผู้รับในระบบธนาคาร
-    const receiverInBank = normalizeAccount(
-      easyslipResult?.data?.receiver?.account?.value ||
-      easyslipResult?.data?.receiver?.proxy?.value ||
-      easyslipResult?.data?.receiver?.account?.bank?.account ||
-      ""
+    // ตรวจสอบบัญชีและชื่อผู้รับเงินในระบบธนาคารกับบัญชีร้านค้า
+    const easyslipReceiver = easyslipResult?.data?.receiver;
+    const receiverInBank =
+      easyslipReceiver?.account?.value ||
+      easyslipReceiver?.proxy?.value ||
+      easyslipReceiver?.account?.bank?.account ||
+      "";
+
+    const receiverNameInBank =
+      easyslipReceiver?.account?.name?.th ||
+      easyslipReceiver?.account?.name?.en ||
+      easyslipReceiver?.name ||
+      "";
+
+    console.log(`[Slip Verification - EasySlip] 🏦 Checking Bank Receiver: Acc (${receiverInBank || "-"}), Name (${receiverNameInBank || "-"}) vs Shop PP (${shopPP || "-"}), BankAcc (${shopBankAcc || "-"}), Name (${shopAccountName || "-"})`);
+
+    const bankReceiverMatch = isReceiverMatch(
+      receiverInBank,
+      receiverNameInBank,
+      shopPP,
+      shopBankAcc,
+      shopAccountName
     );
 
-    if (receiverInBank && (shopPP || shopBankAcc)) {
-      const matchPP = shopPP && (receiverInBank.endsWith(shopPP.slice(-8)) || shopPP.endsWith(receiverInBank.slice(-8)));
-      const matchBank = shopBankAcc && (receiverInBank.endsWith(shopBankAcc.slice(-8)) || shopBankAcc.endsWith(receiverInBank.slice(-8)));
-      if (!matchPP && !matchBank) {
-        console.warn(`[Slip Verification - EasySlip] ❌ Bank receiver mismatch: Receiver in Bank (${receiverInBank}) != Shop PP (${shopPP}) or Bank (${shopBankAcc})`);
-        return {
-          orderId,
-          status: "failed",
-          httpStatus: 400,
-          message: "สลิปนี้ไม่ได้โอนเข้าบัญชีของร้านค้า (บัญชีผู้รับในระบบธนาคารไม่ตรงกับของร้าน)",
-          isPaid: false,
-          easyslipData: easyslipResult,
-        };
-      }
+    if (!bankReceiverMatch.matched) {
+      console.warn(`[Slip Verification - EasySlip] ❌ Bank receiver mismatch: ${bankReceiverMatch.reason}`);
+      return {
+        orderId,
+        status: "failed",
+        httpStatus: 400,
+        message: "สลิปนี้ไม่ได้โอนเข้าบัญชีของร้านค้า (บัญชีหรือชื่อผู้รับในระบบธนาคารไม่ตรงกับของร้าน)",
+        isPaid: false,
+        easyslipData: easyslipResult,
+      };
     }
 
     // ตรวจสอบวันเวลาที่โอนเงิน

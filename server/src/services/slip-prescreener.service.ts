@@ -382,11 +382,11 @@ export class SlipPrescreenerService {
     console.log(`[Slip Step 2] ✅ Passed: Slip reference is unique (TxRef: ${qrData.transactionRef || "N/A"})`);
 
     // ─────────────────────────────────────────────────────────────────────────
-    // ขั้นตอนที่ 3: ตรวจสอบว่ายอดเงินในสลิปตรงไหม
+    // ขั้นตอนที่ 3: ตรวจสอบว่ายอดเงินในสลิปตรงไหม (ต้องตรงกันเป๊ะ ไม่อนุญาตทั้งยอดน้อยกว่าหรือมากกว่า)
     // ─────────────────────────────────────────────────────────────────────────
     if (qrData.amount !== undefined && requiredAmount !== undefined && requiredAmount > 0) {
-      if (qrData.amount < requiredAmount) {
-        console.warn(`[Slip Step 3] ❌ Amount insufficient: Slip amount (${qrData.amount}) < Required (${requiredAmount})`);
+      if (Math.abs(qrData.amount - requiredAmount) > 0.01) {
+        console.warn(`[Slip Step 3] ❌ Amount mismatch: Slip amount (${qrData.amount}) != Required (${requiredAmount})`);
         return {
           passed: false,
           failedStep: 3,
@@ -400,20 +400,31 @@ export class SlipPrescreenerService {
     // ─────────────────────────────────────────────────────────────────────────
     // ขั้นตอนที่ 4: ตรวจสอบว่าธนาคารปลายทาง/บัญชีรับเงินตรงกับร้านค้าหรือไม่
     // ─────────────────────────────────────────────────────────────────────────
-    const normalizeAccount = (s?: string) =>
-      (s || "").replace(/[-\s]/g, "").replace(/^0066/, "0").trim();
+    const cleanDigits = (s?: string) => {
+      let d = (s || "").replace(/\D/g, "");
+      if (d.startsWith("0066")) d = "0" + d.slice(4);
+      else if (d.startsWith("66") && (d.length === 11 || d.length === 12)) d = "0" + d.slice(2);
+      return d;
+    };
 
-    const shopPP = normalizeAccount(shopProfile?.promptpayNumber);
-    const shopBankAcc = normalizeAccount(shopProfile?.bankAccountNumber);
+    const shopPP = cleanDigits(shopProfile?.promptpayNumber);
+    const shopBankAcc = cleanDigits(shopProfile?.bankAccountNumber);
     const shopBankCode = shopProfile?.bankCode || getBankCodeByName(shopProfile?.bankName);
 
     // 4.1 Check Receiver Account Number / PromptPay if decoded in QR
     if (qrData.receiverAccount) {
-      const slipReceiver = normalizeAccount(qrData.receiverAccount);
-      const isMatchPP = shopPP && (slipReceiver.endsWith(shopPP.slice(-8)) || shopPP.endsWith(slipReceiver.slice(-8)));
-      const isMatchBank = shopBankAcc && (slipReceiver.endsWith(shopBankAcc.slice(-8)) || shopBankAcc.endsWith(slipReceiver.slice(-8)));
+      const slipReceiver = cleanDigits(qrData.receiverAccount);
+      let isMatch = false;
+      if (slipReceiver.length >= 4) {
+        if (shopPP && (shopPP === slipReceiver || shopPP.endsWith(slipReceiver) || slipReceiver.endsWith(shopPP) || shopPP.endsWith(slipReceiver.slice(-4)))) {
+          isMatch = true;
+        }
+        if (shopBankAcc && (shopBankAcc === slipReceiver || shopBankAcc.endsWith(slipReceiver) || slipReceiver.endsWith(shopBankAcc) || shopBankAcc.endsWith(slipReceiver.slice(-4)))) {
+          isMatch = true;
+        }
+      }
 
-      if (!isMatchPP && !isMatchBank && (shopPP || shopBankAcc)) {
+      if (!isMatch && (shopPP || shopBankAcc)) {
         console.warn(`[Slip Step 4] ❌ Receiver mismatch: Slip receiver (${slipReceiver}) does not match Shop PP (${shopPP}) or Bank (${shopBankAcc})`);
         return {
           passed: false,
