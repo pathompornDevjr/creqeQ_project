@@ -596,52 +596,194 @@ export class CustomerPrismaRepository implements ICustomerRepository {
       }
     }
 
-    // 4. ตรวจสอบวันที่และเวลาในสลิปสอดคล้องกับปัจจุบันหรือไม่โดย Backend Logic
-    console.log(`[Slip Verification] 🕒 Checking Date/Time: Date (${extracted.transfer_date || "-"}), Time (${extracted.transfer_time || "-"}), Raw (${extracted.datetime_str || "-"})`);
-    let slipDateTime: Date | null = null;
+interface ParsedSlipDate {
+  year: number;
+  month: number;
+  day: number;
+  hour: number;
+  minute: number;
+  second: number;
+  dateObj: Date;
+}
 
-    if (extracted.transfer_date) {
-      try {
-        let datePart = extracted.transfer_date;
-        const yearMatch = datePart.match(/^(\d{4})/);
-        if (yearMatch) {
-          const rawYear = parseInt(yearMatch[1], 10);
-          if (rawYear > 2500) {
-            datePart = `${rawYear - 543}${datePart.slice(4)}`;
-          }
-        }
-        const timePart = extracted.transfer_time || "00:00:00";
-        const parsed = new Date(`${datePart}T${timePart.length === 5 ? timePart + ":00" : timePart}`);
-        if (!isNaN(parsed.getTime())) {
-          slipDateTime = parsed;
-        }
-      } catch {}
+/**
+ * แปลงฟอร์แมตวันที่และเวลาไทยในสลิปทุกรูปแบบให้เป็น Date Object มาตรฐานตามเวลาไทย (Asia/Bangkok, UTC+7)
+ * รองรับ: 13 ก.ย. 69, 13 ก.ย. 2569, 13 กันยายน 2567, 13/09/69, 13/09/2569, 2026-09-13, 13-09-2026 ฯลฯ
+ */
+function parseThaiSlipDateTime(
+  transferDate?: string,
+  transferTime?: string,
+  rawStr?: string
+): ParsedSlipDate | null {
+  const thaiMonths: Record<string, number> = {
+    "ม.ค.": 1, "มกราคม": 1, "jan": 1, "january": 1,
+    "ก.พ.": 2, "กุมภาพันธ์": 2, "feb": 2, "february": 2,
+    "มี.ค.": 3, "มีนาคม": 3, "mar": 3, "march": 3,
+    "เม.ย.": 4, "เมษายน": 4, "apr": 4, "april": 4,
+    "พ.ค.": 5, "พฤษภาคม": 5, "may": 5,
+    "มิ.ย.": 6, "มิถุนายน": 6, "jun": 6, "june": 6,
+    "ก.ค.": 7, "กรกฎาคม": 7, "jul": 7, "july": 7,
+    "ส.ค.": 8, "สิงหาคม": 8, "aug": 8, "august": 8,
+    "ก.ย.": 9, "กันยายน": 9, "sep": 9, "september": 9,
+    "ต.ค.": 10, "ตุลาคม": 10, "oct": 10, "october": 10,
+    "พ.ย.": 11, "พฤศจิกายน": 11, "nov": 11, "november": 11,
+    "ธ.ค.": 12, "ธันวาคม": 12, "dec": 12, "december": 12,
+  };
+
+  let year: number | null = null;
+  let month: number | null = null;
+  let day: number | null = null;
+  let hour = 0;
+  let minute = 0;
+  let second = 0;
+
+  const fullText = `${transferDate || ""} ${transferTime || ""} ${rawStr || ""}`.trim();
+  if (!fullText) return null;
+
+  // 1. ดึงข้อมูลเวลา (เช่น 14:30:15, 14:30, 14.30, 14:30 น.)
+  const timeMatch = fullText.match(/(\d{1,2})[:.](\d{2})(?:[:.](\d{2}))?/);
+  if (timeMatch) {
+    hour = parseInt(timeMatch[1], 10);
+    minute = parseInt(timeMatch[2], 10);
+    if (timeMatch[3]) second = parseInt(timeMatch[3], 10);
+  }
+
+  // 2. ตรวจจับชื่อเดือนภาษาไทย/อังกฤษ (เช่น "13 ก.ย. 69", "13 ก.ย. 2569", "13 กันยายน 2567")
+  for (const [mName, mVal] of Object.entries(thaiMonths)) {
+    const escaped = mName.replace(/\./g, "\\.");
+    const regex = new RegExp(`(\\d{1,2})\\s*(?:${escaped})\\s*(\\d{2,4})`, "i");
+    const match = fullText.match(regex);
+    if (match) {
+      day = parseInt(match[1], 10);
+      month = mVal;
+      let yr = parseInt(match[2], 10);
+      if (yr < 100) {
+        yr = yr >= 40 ? 2500 + yr - 543 : 2000 + yr;
+      } else if (yr > 2500) {
+        yr -= 543;
+      }
+      year = yr;
+      break;
     }
+  }
 
-    if (!slipDateTime && extracted.datetime_str) {
-      const match = extracted.datetime_str.match(/(202[4-9]|203[0-5]|256[7-9]|257[0-9])[-/.]?(0[1-9]|1[0-2])[-/.]?([0-2]\d|3[01])/);
-      if (match) {
-        let yr = parseInt(match[1], 10);
-        if (yr > 2500) yr -= 543;
-        slipDateTime = new Date(yr, parseInt(match[2], 10) - 1, parseInt(match[3], 10));
+  // 3. ตรวจจับวันที่รูปแบบตัวเลข (เช่น YYYY-MM-DD, DD/MM/YYYY, DD-MM-YY)
+  if (!year || !month || !day) {
+    // Format YYYY-MM-DD
+    const isoMatch = fullText.match(/(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})/);
+    if (isoMatch) {
+      let yr = parseInt(isoMatch[1], 10);
+      if (yr > 2500) yr -= 543;
+      year = yr;
+      month = parseInt(isoMatch[2], 10);
+      day = parseInt(isoMatch[3], 10);
+    } else {
+      // Format DD/MM/YYYY หรือ DD/MM/YY
+      const dmyMatch = fullText.match(/(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})/);
+      if (dmyMatch) {
+        day = parseInt(dmyMatch[1], 10);
+        month = parseInt(dmyMatch[2], 10);
+        let yr = parseInt(dmyMatch[3], 10);
+        if (yr < 100) {
+          yr = yr >= 40 ? 2500 + yr - 543 : 2000 + yr;
+        } else if (yr > 2500) {
+          yr -= 543;
+        }
+        year = yr;
       }
     }
+  }
 
-    if (slipDateTime) {
+  if (year && month && day && month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+    const pad = (n: number) => String(n).padStart(2, "0");
+    // กำหนด Timezone เวลาไทย (+07:00) เสมอ เพื่อป้องกัน UTC Server Drift
+    const isoStr = `${year}-${pad(month)}-${pad(day)}T${pad(hour)}:${pad(minute)}:${pad(second)}+07:00`;
+    const dateObj = new Date(isoStr);
+    if (!isNaN(dateObj.getTime())) {
+      return { year, month, day, hour, minute, second, dateObj };
+    }
+  }
+
+  return null;
+}
+
+    // 4. ตรวจสอบวันที่และเวลาในสลิปสอดคล้องกับปัจจุบันหรือไม่โดย Backend Logic
+    console.log(`[Slip Verification] 🕒 Checking Date/Time: Date (${extracted.transfer_date || "-"}), Time (${extracted.transfer_time || "-"}), Raw (${extracted.datetime_str || "-"})`);
+
+    const parsedSlip = parseThaiSlipDateTime(
+      extracted.transfer_date,
+      extracted.transfer_time,
+      extracted.datetime_str
+    );
+
+    if (parsedSlip) {
       const now = new Date();
-      const diffHours = (now.getTime() - slipDateTime.getTime()) / (1000 * 60 * 60);
-      if (diffHours < -2) {
-        console.warn(`[Slip Verification] ❌ Transfer date in future: ${slipDateTime.toISOString()}`);
+      // ดึงวัน/เดือน/ปี ปัจจุบันตามเวลาประเทศไทย (Asia/Bangkok)
+      const bkkFormatter = new Intl.DateTimeFormat("en-US", {
+        timeZone: "Asia/Bangkok",
+        year: "numeric",
+        month: "numeric",
+        day: "numeric",
+        hour: "numeric",
+        minute: "numeric",
+        second: "numeric",
+        hour12: false,
+      });
+      const parts = bkkFormatter.formatToParts(now);
+      const bkkParts: Record<string, number> = {};
+      parts.forEach((p) => {
+        if (p.type !== "literal") bkkParts[p.type] = parseInt(p.value, 10);
+      });
+
+      const todayYear = bkkParts.year || now.getFullYear();
+      const todayMonth = bkkParts.month || now.getMonth() + 1;
+      const todayDay = bkkParts.day || now.getDate();
+
+      console.log(`[Slip Verification] 📅 Slip Date: ${parsedSlip.year}-${parsedSlip.month}-${parsedSlip.day} ${parsedSlip.hour}:${parsedSlip.minute} | Bangkok Today: ${todayYear}-${todayMonth}-${todayDay}`);
+
+      // 4.1 ตรวจสอบวันที่ (Calendar Date Check)
+      const slipCalendarDate = new Date(parsedSlip.year, parsedSlip.month - 1, parsedSlip.day).getTime();
+      const todayCalendarDate = new Date(todayYear, todayMonth - 1, todayDay).getTime();
+      const diffDays = Math.round((todayCalendarDate - slipCalendarDate) / (1000 * 60 * 60 * 24));
+
+      if (diffDays < 0) {
+        console.warn(`[Slip Verification] ❌ Slip date is in future: ${parsedSlip.year}-${parsedSlip.month}-${parsedSlip.day} (Diff: ${diffDays} days)`);
         return {
           orderId,
           status: "failed",
           httpStatus: 400,
-          message: "วันที่และเวลาในสลิปไม่ถูกต้อง (พบเวลาในอนาคต)",
+          message: "วันที่ในสลิปไม่ถูกต้อง (พบวันที่ในอนาคต)",
           isPaid: false,
         };
       }
-      if (diffHours > 24) {
-        console.warn(`[Slip Verification] ❌ Transfer date expired: ${diffHours.toFixed(1)} hours ago`);
+
+      if (diffDays > 1) {
+        console.warn(`[Slip Verification] ❌ Slip date expired: ${parsedSlip.year}-${parsedSlip.month}-${parsedSlip.day} (${diffDays} days ago)`);
+        return {
+          orderId,
+          status: "failed",
+          httpStatus: 400,
+          message: "สลิปโอนเงินหมดอายุ (กรุณาใช้สลิปที่โอนในวันเดียวกับการสั่งซื้อ)",
+          isPaid: false,
+        };
+      }
+
+      // 4.2 ตรวจสอบเวลา (Time Check) — ให้ความยืดหยุ่นเวลานาฬิกาลูกค้าล่วงหน้าได้ 30 นาที
+      const diffMinutes = (now.getTime() - parsedSlip.dateObj.getTime()) / (1000 * 60);
+
+      if (diffMinutes < -30) {
+        console.warn(`[Slip Verification] ❌ Slip time is in future: ${diffMinutes.toFixed(1)} minutes ahead`);
+        return {
+          orderId,
+          status: "failed",
+          httpStatus: 400,
+          message: "เวลาในสลิปไม่ถูกต้อง (พบเวลาในอนาคต)",
+          isPaid: false,
+        };
+      }
+
+      if (diffMinutes > 24 * 60) {
+        console.warn(`[Slip Verification] ❌ Slip time expired: ${(diffMinutes / 60).toFixed(1)} hours ago`);
         return {
           orderId,
           status: "failed",
