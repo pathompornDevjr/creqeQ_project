@@ -152,47 +152,53 @@ export class GeminiSlipService {
       ],
     };
 
-    let lastError: any = null;
+    const targetModel = process.env.GEMINI_MODEL?.trim() || "gemini-3.6-flash";
 
-    for (const modelName of candidateModels) {
-      try {
-        console.log(`[Gemini Vision] 🤖 Trying model [${modelName}] to extract slip data...`);
-        const model = client.getGenerativeModel({
-          model: modelName,
-          generationConfig: {
-            temperature: 0.1,
-            responseMimeType: "application/json",
-            responseSchema: schemaConfig,
+    try {
+      console.log(`[Gemini Vision] 🤖 Extracting structured data from slip image using [${targetModel}]...`);
+      const model = client.getGenerativeModel({
+        model: targetModel,
+        generationConfig: {
+          temperature: 0.1,
+          responseMimeType: "application/json",
+          responseSchema: schemaConfig,
+        },
+      });
+
+      const result = await model.generateContent([
+        prompt,
+        {
+          inlineData: {
+            mimeType,
+            data: cleanBase64,
           },
-        });
+        },
+      ]);
 
-        const result = await model.generateContent([
-          prompt,
-          {
-            inlineData: {
-              mimeType,
-              data: cleanBase64,
-            },
-          },
-        ]);
+      const textResponse = result.response.text();
+      console.log(`[Gemini Slip Extractor] 🤖 Raw AI Extraction Response:\n`, textResponse);
 
-        const textResponse = result.response.text();
-        console.log(`[Gemini Slip Extractor] 🤖 Raw AI Extraction Response (${modelName}):\n`, textResponse);
+      const parsed: ExtractedSlipData = JSON.parse(textResponse);
+      parsed.is_api_error = false;
+      return parsed;
+    } catch (err: any) {
+      console.error("[Gemini AI Error]", err);
+      const errMsg = String(err?.message || err);
 
-        const parsed: ExtractedSlipData = JSON.parse(textResponse);
-        parsed.is_api_error = false;
-        return parsed;
-      } catch (err: any) {
-        lastError = err;
-        console.warn(`[Gemini AI] ⚠️ Model [${modelName}] failed: ${err?.message || err}`);
+      let userFacingError = "เกิดข้อผิดพลาดในการเชื่อมต่อกับ AI ตรวจสอบสลิป";
+      if (errMsg.includes("429") || errMsg.includes("Quota") || errMsg.includes("quota") || errMsg.includes("rate-limit")) {
+        userFacingError = "โควตาการใช้งานการตรวจสลิป เต็มชั่วคราว กรุณารอสักครู่ (ประมาณ 1 นาที) แล้วลองใหม่อีกครั้ง";
+      } else if (errMsg.includes("404") || errMsg.includes("not found")) {
+        userFacingError = `ไม่พบโมเดล AI (${targetModel}) กรุณาตรวจสอบการตั้งค่า GEMINI_MODEL`;
+      } else if (errMsg.includes("API_KEY") || errMsg.includes("key")) {
+        userFacingError = "API Key ของ Google Gemini ไม่ถูกต้องหรือหมดอายุ";
       }
-    }
 
-    console.error("[Gemini AI All Models Failed]", lastError);
-    return {
-      is_bank_slip: false,
-      is_api_error: true,
-      error_message: lastError?.message || "เกิดข้อผิดพลาดในการสกัดข้อมูลสลิปด้วย AI ทุก Model",
-    };
+      return {
+        is_bank_slip: false,
+        is_api_error: true,
+        error_message: userFacingError,
+      };
+    }
   }
 }

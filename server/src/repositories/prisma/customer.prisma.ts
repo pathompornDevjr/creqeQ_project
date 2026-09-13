@@ -537,7 +537,7 @@ export class CustomerPrismaRepository implements ICustomerRepository {
         orderId,
         status: "error",
         httpStatus: 503,
-        message: "เกิดข้อผิดพลาดในการตรวจสอบสลิปด้วย API ไม่สามารถใช้งานได้",
+        message: extracted.error_message || "เกิดข้อผิดพลาดในการตรวจสอบสลิปด้วย API ไม่สามารถใช้งานได้",
         isPaid: false,
       };
     }
