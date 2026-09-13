@@ -529,15 +529,50 @@ export class CustomerPrismaRepository implements ICustomerRepository {
     console.log(`\n================== [Slip Verification: Order #${orderId}] ==================`);
     console.log(`[Slip Verification] 🤖 Phase 1: Extracting slip data via [Google Gemini AI Vision]...`);
 
-    const extracted = await GeminiSlipService.extractSlipData(fileBase64);
+    let extracted = await GeminiSlipService.extractSlipData(fileBase64);
+
+    // 💡 Fallback: ถ้า Gemini AI ติด 429 Rate Limit หรือเกิด Error ให้สลับไปถอดรหัส BOT Mini QR Code ในเครื่องทันที
+    if (extracted.is_api_error) {
+      console.log(`[Slip Verification] ⚠️ Gemini AI unavailable (${extracted.error_message}) -> Attempting Local BOT Mini QR Decoder fallback...`);
+      try {
+        const qrScan = await SlipPrescreenerService.extractQrFromBase64(fileBase64);
+        if (qrScan?.payload) {
+          const qrData = parseEmvSlipQr(qrScan.payload);
+          const isSlipStandard =
+            qrData.format === "BOT_MINI_QR" ||
+            qrData.format === "PROMPTPAY_EMV" ||
+            qrScan.payload.startsWith("000201") ||
+            qrScan.payload.startsWith("0045") ||
+            qrScan.payload.startsWith("0038") ||
+            qrScan.payload.includes("000001") ||
+            qrScan.payload.includes("A000000677");
+
+          if (isSlipStandard) {
+            console.log(`[Slip Verification] ✅ Successfully extracted slip data via Local BOT Mini QR (Engine: ${qrScan.engine})`);
+            extracted = {
+              is_bank_slip: true,
+              amount: qrData.amount,
+              transfer_date: qrData.rawDateStr || (qrData.transferDate ? qrData.transferDate.toISOString().slice(0, 10) : undefined),
+              datetime_str: qrData.rawDateStr,
+              receiver_bank: qrData.receivingBank,
+              receiver_account: qrData.receiverAccount,
+              transaction_ref: qrData.transactionRef,
+              is_api_error: false,
+            };
+          }
+        }
+      } catch (qrErr) {
+        console.warn("[Slip Verification] Local QR fallback error:", qrErr);
+      }
+    }
 
     if (extracted.is_api_error) {
-      console.warn(`[Slip Verification] ❌ AI Extraction Error: ${extracted.error_message}`);
+      console.warn(`[Slip Verification] ❌ Both Gemini AI and Local QR fallback failed: ${extracted.error_message}`);
       return {
         orderId,
         status: "error",
         httpStatus: 503,
-        message: extracted.error_message || "เกิดข้อผิดพลาดในการตรวจสอบสลิปด้วย API ไม่สามารถใช้งานได้",
+        message: extracted.error_message || "เกิดข้อผิดพลาดในการตรวจสอบสลิป กรุณาลองใหม่อีกครั้ง",
         isPaid: false,
       };
     }
@@ -556,14 +591,14 @@ export class CustomerPrismaRepository implements ICustomerRepository {
 
     // 2. ตรวจสอบยอดเงินในสลิปโดย Backend Logic
     const slipAmount: number = Number(extracted.amount || 0);
-    console.log(`[Slip Verification] 💵 Checking Amount: Slip (${slipAmount} THB) vs Required (${requiredAmount} THB)`);
-    if (slipAmount <= 0 || slipAmount < requiredAmount) {
+    console.log(`[Slip Verification] 💵 Checking Amount: Slip (${slipAmount > 0 ? slipAmount : "Pending EasySlip check"} THB) vs Required (${requiredAmount} THB)`);
+    if (slipAmount > 0 && requiredAmount > 0 && slipAmount < requiredAmount) {
       console.warn(`[Slip Verification] ❌ Amount mismatch: Slip (${slipAmount}) < Required (${requiredAmount})`);
       return {
         orderId,
         status: "failed",
         httpStatus: 400,
-        message: `ยอดเงินในสลิป (${slipAmount > 0 ? slipAmount.toLocaleString() : 0} บาท) ไม่ตรงกับยอดที่ต้องชำระ (${requiredAmount.toLocaleString()} บาท)`,
+        message: `ยอดเงินในสลิป (${slipAmount.toLocaleString()} บาท) ไม่ตรงกับยอดที่ต้องชำระ (${requiredAmount.toLocaleString()} บาท)`,
         isPaid: false,
       };
     }

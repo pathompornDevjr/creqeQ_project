@@ -94,7 +94,7 @@ export class GeminiSlipService {
 4. อ่านธนาคารปลายทาง (receiver_bank)
 5. อ่านเลขบัญชี/เบอร์พร้อมเพย์ผู้รับ (receiver_account)
 6. อ่านชื่อบัญชีผู้รับ (receiver_name)
-7. อ่านรหัสอ้างอิงธุรกรรม (transaction_ref) หากมี
+7. อ่านรหัสอ้างอิงธุรกรรม (transaction_ref)
 
 ตอบกลับเป็น JSON ตาม Schema ที่กำหนดเท่านั้น
 `;

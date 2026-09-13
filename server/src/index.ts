@@ -19,7 +19,6 @@ import { customerRoutes } from "./routes/customer.route";
 import { authRoutes } from "./routes/auth.route";
 import { realtimeRoutes } from "./routes/realtime.route";
 import { ttsRoutes } from "./routes/tts.route";
-import { paymentRoutes } from "./routes/payment.route";
 import prisma from "./database/prisma";
 import { apiKeyGuard } from "./libs/apiKeyGuard";
 
@@ -189,7 +188,6 @@ const app = new Elysia()
       .use(menuRoutes)       // เส้นทางจัดการเมนูอาหาร
       .use(restaurantRoutes) // เส้นทางจัดการข้อมูลร้านค้าและออเดอร์ในครัว
       .use(customerRoutes)   // เส้นทางสำหรับฝั่งลูกค้า (สั่งอาหาร ตรวจสอบคิว)
-      .use(paymentRoutes)    // เส้นทางระบบชำระเงิน (พร้อมเพย์ / สแกนสลิป)
       .use(realtimeRoutes)   // เส้นทาง Realtime SSE / WebSockets
       .use(ttsRoutes)        // เส้นทาง Text-to-Speech (เสียงเรียกคิว)
   );
