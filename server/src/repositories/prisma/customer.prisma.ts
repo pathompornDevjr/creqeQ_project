@@ -12,7 +12,7 @@
 import prisma from "../../database/prisma";
 import { RealtimeService } from "../../services/realtime.service";
 import { StorageService } from "../../services/storage.service";
-import { SlipPrescreenerService, parseEmvSlipQr } from "../../services/slip-prescreener.service";
+import { SlipPrescreenerService, parseEmvSlipQr, getBankCodeByName } from "../../services/slip-prescreener.service";
 import { GeminiSlipService } from "../../services/gemini-slip.service";
 import {
   CartItemDTO,
@@ -628,6 +628,21 @@ export class CustomerPrismaRepository implements ICustomerRepository {
             isPaid: false,
           };
         }
+      }
+    }
+
+    // ตรวจสอบรหัสธนาคารปลายทาง (กรณีถอดรหัสจาก BOT Mini QR)
+    const shopBankCode = getBankCodeByName(shopProfile.bankName);
+    if (extracted.receiver_bank && shopBankCode && /^\d{3}$/.test(extracted.receiver_bank)) {
+      if (extracted.receiver_bank !== shopBankCode) {
+        console.warn(`[Slip Verification] ❌ Bank code mismatch: Slip (${extracted.receiver_bank}) != Shop (${shopBankCode})`);
+        return {
+          orderId,
+          status: "failed",
+          httpStatus: 400,
+          message: "ธนาคารปลายทางในสลิปไม่ตรงกับธนาคารของร้านค้า กรุณาตรวจสอบและลองใหม่อีกครั้ง",
+          isPaid: false,
+        };
       }
     }
 
