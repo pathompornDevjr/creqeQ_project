@@ -1438,20 +1438,22 @@ export class CustomerPrismaRepository implements ICustomerRepository {
     const cleanPhone = (phone || "").trim();
     const identifier = cleanPhone || cleanNick;
 
-    const existing = await prisma.customers.findFirst({
-      where: {
-        OR: [
-          { phone: identifier },
-          { nickname: cleanNick },
-        ],
-      },
-    });
+    const existing = cleanPhone
+      ? await prisma.customers.findFirst({
+          where: { phone: cleanPhone },
+        })
+      : cleanNick
+      ? await prisma.customers.findFirst({
+          where: { nickname: cleanNick },
+        })
+      : null;
 
     if (existing) {
       const updated = await prisma.customers.update({
         where: { customer_id: existing.customer_id },
         data: {
           nickname: cleanNick || existing.nickname,
+          phone: cleanPhone || existing.phone,
           avatar_url: avatarUrl !== undefined ? avatarUrl : existing.avatar_url,
           updatedAt: new Date(),
         },

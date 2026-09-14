@@ -1009,11 +1009,18 @@ export function MenuClient({ tableId = "online", shopId = "1", initialStage }: M
   useEffect(() => {
     if (typeof window !== "undefined") {
       try {
-        const saved = localStorage.getItem("crepe_customer");
+        const saved =
+          localStorage.getItem("crepe_customer") ||
+          localStorage.getItem("crepe_user") ||
+          localStorage.getItem("crepeq_customer_session");
         if (saved) {
           const parsed = JSON.parse(saved);
-          if (parsed && parsed.nickname && parsed.phone) {
-            setCurrentUser(parsed);
+          if (parsed && (parsed.nickname || parsed.phone)) {
+            setCurrentUser({
+              nickname: parsed.nickname || "ลูกค้า",
+              phone: parsed.phone || "",
+              customer_id: parsed.customer_id,
+            });
           }
         }
         const savedOrd = localStorage.getItem(`crepe_active_order_${tableId}`);
@@ -1038,12 +1045,22 @@ export function MenuClient({ tableId = "online", shopId = "1", initialStage }: M
     }
     if (typeof window !== "undefined") {
       try {
-        const saved = localStorage.getItem("crepe_customer");
+        const saved =
+          localStorage.getItem("crepe_customer") ||
+          localStorage.getItem("crepe_user") ||
+          localStorage.getItem("crepeq_customer_session");
         if (saved) {
           const parsed = JSON.parse(saved);
-          if (parsed && parsed.nickname && parsed.phone) {
-            setCurrentUser(parsed);
-            return parsed;
+          if (parsed && (parsed.nickname || parsed.phone)) {
+            const userObj = {
+              nickname: parsed.nickname || "ลูกค้า",
+              phone: parsed.phone || "",
+              customer_id: parsed.customer_id,
+            };
+            if (userObj.nickname && userObj.phone) {
+              setCurrentUser(userObj);
+              return userObj;
+            }
           }
         }
       } catch {}
@@ -1342,6 +1359,7 @@ export function MenuClient({ tableId = "online", shopId = "1", initialStage }: M
       if (typeof window !== "undefined") {
         try {
           localStorage.setItem("crepe_user", JSON.stringify(updatedUser));
+          localStorage.setItem("crepe_customer", JSON.stringify(updatedUser));
         } catch {}
       }
     }
@@ -1589,6 +1607,12 @@ export function MenuClient({ tableId = "online", shopId = "1", initialStage }: M
           onClose={() => setIsLoginModalOpen(false)}
           onSuccess={(u) => {
             setCurrentUser(u);
+            if (typeof window !== "undefined") {
+              try {
+                localStorage.setItem("crepe_customer", JSON.stringify(u));
+                localStorage.setItem("crepe_user", JSON.stringify(u));
+              } catch {}
+            }
             handleAddNewCrepe();
           }}
           onBrowseMenuWithoutLogin={handleAddNewCrepe}
@@ -1935,6 +1959,12 @@ export function MenuClient({ tableId = "online", shopId = "1", initialStage }: M
           onClose={() => setIsLoginModalOpen(false)}
           onSuccess={(u) => {
             setCurrentUser(u);
+            if (typeof window !== "undefined") {
+              try {
+                localStorage.setItem("crepe_customer", JSON.stringify(u));
+                localStorage.setItem("crepe_user", JSON.stringify(u));
+              } catch {}
+            }
             setIsLoginModalOpen(false);
             setIsConfirmOrderModalOpen(true);
           }}
@@ -1961,6 +1991,7 @@ export function MenuClient({ tableId = "online", shopId = "1", initialStage }: M
             if (typeof window !== "undefined") {
               try {
                 localStorage.setItem("crepe_user", JSON.stringify(updated));
+                localStorage.setItem("crepe_customer", JSON.stringify(updated));
               } catch {}
             }
           }}
